@@ -282,14 +282,14 @@ class BitcoinD(TailableProc):
 
         self.bitcoin_dir = bitcoin_dir
         self.rpcport = rpcport
-        self.prefix = 'bitcoind'
+        self.prefix = 'vipstarcoind'
 
         regtestdir = os.path.join(bitcoin_dir, 'regtest')
         if not os.path.exists(regtestdir):
             os.makedirs(regtestdir)
 
         self.cmd_line = [
-            'bitcoind',
+            'vipstarcoind',
             '-datadir={}'.format(bitcoin_dir),
             '-printtoconsole',
             '-server',
@@ -303,7 +303,7 @@ class BitcoinD(TailableProc):
         # For after 0.16.1 (eg. 3f398d7a17f136cd4a67998406ca41a124ae2966), this
         # needs its own [regtest] section.
         BITCOIND_REGTEST = {'rpcport': rpcport}
-        btc_conf_file = os.path.join(bitcoin_dir, 'bitcoin.conf')
+        btc_conf_file = os.path.join(bitcoin_dir, 'vipstarcoin.conf')
         write_config(btc_conf_file, BITCOIND_CONFIG, BITCOIND_REGTEST)
         self.rpc = SimpleBitcoinProxy(btc_conf_file=btc_conf_file)
         self.proxies = []
