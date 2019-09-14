@@ -117,7 +117,7 @@ def test_closing_while_disconnected(node_factory, bitcoind):
     l1.daemon.wait_for_log('sendrawtx exit 0')
     l2.daemon.wait_for_log('sendrawtx exit 0')
 
-    bitcoind.generate_block(101)
+    bitcoind.generate_block(501)
     wait_for(lambda: len(l1.rpc.listchannels()['channels']) == 0)
     wait_for(lambda: len(l2.rpc.listchannels()['channels']) == 0)
 
@@ -533,7 +533,7 @@ def test_onchain_unwatch(node_factory, bitcoind):
 @unittest.skipIf(not DEVELOPER, "needs DEVELOPER=1")
 def test_onchaind_replay(node_factory, bitcoind):
     disconnects = ['+WIRE_REVOKE_AND_ACK', 'permfail']
-    options = {'watchtime-blocks': 201, 'cltv-delta': 101}
+    options = {'watchtime-blocks': 201, 'cltv-delta': 501}
     # Feerates identical so we don't get gratuitous commit to update them
     l1 = node_factory.get_node(options=options, disconnect=disconnects, feerates=(7500, 7500, 7500))
     l2 = node_factory.get_node(options=options)
@@ -545,7 +545,7 @@ def test_onchaind_replay(node_factory, bitcoind):
     routestep = {
         'msatoshi': 10**8 - 1,
         'id': l2.info['id'],
-        'delay': 101,
+        'delay': 501,
         'channel': '1x1x1'
     }
     l1.rpc.sendpay([routestep], rhash)

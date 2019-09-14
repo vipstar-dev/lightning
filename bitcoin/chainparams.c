@@ -11,12 +11,12 @@
 #define BIP32_VER_TEST_PRIVATE 0x04358394
 
 const struct chainparams networks[] = {
-    {.network_name = "bitcoin",
-     .bip173_name = "bc",
+    {.network_name = "vipstarcoin",
+     .bip173_name = "vips",
      .bip70_name = "main",
-     .genesis_blockhash = {{{.u.u8 = {0x6f, 0xe2, 0x8c, 0x0a, 0xb6, 0xf1, 0xb3, 0x72, 0xc1, 0xa6, 0xa2, 0x46, 0xae, 0x63, 0xf7, 0x4f, 0x93, 0x1e, 0x83, 0x65, 0xe1, 0x5a, 0x08, 0x9c, 0x68, 0xd6, 0x19, 0x00, 0x00, 0x00, 0x00, 0x00}}}},
-     .rpc_port = 8332,
-     .cli = "bitcoin-cli",
+     .genesis_blockhash = {{{.u.u8 = {0x7c, 0xb7, 0x09, 0xee, 0xb1, 0x06, 0x15, 0x13, 0x5c, 0x29, 0x22, 0xa7, 0xa6, 0x69, 0xee, 0xc6, 0xe9, 0x6b, 0x10, 0x37, 0x61 0x44, 0x64, 0xfb, 0x79, 0x0f, 0xd3, 0xe1, 0x68, 0xd0, 0x00, 0x00}}}},
+     .rpc_port = 31916,
+     .cli = "vipstarcoin-cli",
      .cli_args = NULL,
      .dust_limit = { 546 },
      /* BOLT #2:
@@ -29,8 +29,8 @@ const struct chainparams networks[] = {
      .max_payment = AMOUNT_MSAT_INIT(0xFFFFFFFFULL),
      /* "Lightning Charge Powers Developers & Blockstream Store" */
      .when_lightning_became_cool = 504500,
-     .p2pkh_version = 0,
-     .p2sh_version = 5,
+     .p2pkh_version = 70,
+     .p2sh_version = 50,
      .testnet = false,
      .bip32_key_version = {.bip32_pubkey_version = BIP32_VER_MAIN_PUBLIC, .bip32_privkey_version = BIP32_VER_MAIN_PRIVATE}},
     {.network_name = "regtest",

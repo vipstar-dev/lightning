@@ -89,8 +89,8 @@ def bitcoind(directory):
 
     info = bitcoind.rpc.getblockchaininfo()
     # Make sure we have some spendable funds
-    if info['blocks'] < 101:
-        bitcoind.generate_block(101 - info['blocks'])
+    if info['blocks'] < 501:
+        bitcoind.generate_block(501 - info['blocks'])
     elif bitcoind.rpc.getwalletinfo()['balance'] < 1:
         logging.debug("Insufficient balance, generating 1 block")
         bitcoind.generate_block(1)
