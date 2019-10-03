@@ -229,7 +229,9 @@ class UnixDomainSocketRpc(object):
         sock.close()
 
         self.logger.debug("Received response for %s call: %r", method, resp)
-        if "error" in resp:
+        if not isinstance(resp, dict):
+            raise ValueError("Malformed response, response is not a dictionary %s." % resp)
+        elif "error" in resp:
             raise RpcError(method, payload, resp['error'])
         elif "result" not in resp:
             raise ValueError("Malformed response, \"result\" missing.")
@@ -431,16 +433,6 @@ class LightningRpc(UnixDomainSocketRpc):
         """
         return self.call("dev-memleak")
 
-    def dev_query_scids(self, id, scids):
-        """
-        Ask peer for a particular set of scids
-        """
-        payload = {
-            "id": id,
-            "scids": scids
-        }
-        return self.call("dev-query-scids", payload)
-
     def dev_reenable_commit(self, peer_id):
         """
         Re-enable the commit timer on peer {id}
@@ -596,8 +588,8 @@ class LightningRpc(UnixDomainSocketRpc):
         {cltv} (default 9). If specified search from {fromid} otherwise use
         this node as source. Randomize the route with up to {fuzzpercent}
         (0.0 -> 100.0, default 5.0). {exclude} is an optional array of
-        scid/direction to exclude. Limit the number of hops in the route to
-        {maxhops}.
+        scid/direction or node-id to exclude. Limit the number of hops in the
+        route to {maxhops}.
         """
         payload = {
             "id": node_id,
@@ -804,17 +796,36 @@ class LightningRpc(UnixDomainSocketRpc):
         }
         return self.call("plugin", payload)
 
-    def sendpay(self, route, payment_hash, description=None, msatoshi=None):
-        """
-        Send along {route} in return for preimage of {payment_hash}
-        """
+    def _deprecated_sendpay(self, route, payment_hash, description, msatoshi=None):
+        warnings.warn("sendpay: the 'description' field is renamed 'label' : expect removal"
+                      " in early-2020",
+                      DeprecationWarning)
         payload = {
             "route": route,
             "payment_hash": payment_hash,
-            "description": description,
+            "label": description,
             "msatoshi": msatoshi,
         }
         return self.call("sendpay", payload)
+
+    def sendpay(self, route, payment_hash, *args, **kwargs):
+        """
+        Send along {route} in return for preimage of {payment_hash}
+        """
+
+        if 'description' in kwargs:
+            return self._deprecated_sendpay(route, payment_hash, *args, **kwargs)
+
+        def _sendpay(route, payment_hash, label=None, msatoshi=None):
+            payload = {
+                "route": route,
+                "payment_hash": payment_hash,
+                "label": label,
+                "msatoshi": msatoshi,
+            }
+            return self.call("sendpay", payload)
+
+        return _sendpay(route, payment_hash, *args, **kwargs)
 
     def setchannelfee(self, id, base=None, ppm=None):
         """

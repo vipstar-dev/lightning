@@ -28,7 +28,7 @@
 #include <common/bech32_util.h>
 #include <common/cryptomsg.h>
 #include <common/daemon_conn.h>
-#include <common/decode_short_channel_ids.h>
+#include <common/decode_array.h>
 #include <common/features.h>
 #include <common/memleak.h>
 #include <common/ping.h>
@@ -148,6 +148,9 @@ struct daemon {
 
 	/* File descriptors to listen on once we're activated. */
 	struct listen_fd *listen_fds;
+
+	/* Allow to define the default behavior of tot services calls*/
+	bool use_v3_autotor;
 };
 
 /* Peers we're trying to reach: we iterate through addrs until we succeed
@@ -439,10 +442,6 @@ struct io_plan *peer_connected(struct io_conn *conn,
 
 	/* This contains the per-peer state info; gossipd fills in pps->gs */
 	pps = new_per_peer_state(tmpctx, cs);
-#if DEVELOPER
-	/* Overridden by lightningd, but initialize to keep valgrind happy */
-	pps->dev_gossip_broadcast_msec = 0;
-#endif
 
 	/* If gossipd can't give us a file descriptor, we give up connecting. */
 	if (!get_gossipfds(daemon, id, localfeatures, pps))
@@ -1118,14 +1117,16 @@ static struct wireaddr_internal *setup_listeners(const tal_t *ctx,
 				tor_autoservice(tmpctx,
 						&proposed_wireaddr[i].u.torservice,
 						tor_password,
-						binding);
+						binding,
+						daemon->use_v3_autotor);
 			continue;
 		};
 		add_announcable(announcable,
 				tor_autoservice(tmpctx,
 						&proposed_wireaddr[i].u.torservice,
 						tor_password,
-						binding));
+						binding,
+						daemon->use_v3_autotor));
 	}
 
 	/* Sort and uniquify. */
@@ -1157,7 +1158,8 @@ static struct io_plan *connect_init(struct io_conn *conn,
 		&proposed_listen_announce,
 		&proxyaddr, &daemon->use_proxy_always,
 		&daemon->dev_allow_localhost, &daemon->use_dns,
-		&tor_password)) {
+		&tor_password,
+		&daemon->use_v3_autotor)) {
 		/* This is a helper which prints the type expected and the actual
 		 * message, then exits (it should never be called!). */
 		master_badmsg(WIRE_CONNECTCTL_INIT, msg);
@@ -1242,7 +1244,14 @@ static struct io_plan *connect_activate(struct io_conn *conn,
 	return daemon_conn_read_next(conn, daemon->master);
 }
 
-/*~ This is where we'd put a BOLT #10 reference, but it doesn't exist :( */
+/* BOLT #10:
+ *
+ * The DNS seed:
+ *   ...
+ *   - upon receiving a _node_ query:
+ *     - MUST select the record matching the `node_id`, if any, AND return all
+ *       addresses associated with that node.
+ */
 static const char **seednames(const tal_t *ctx, const struct node_id *id)
 {
 	char bech32[100];
@@ -1268,27 +1277,24 @@ static void add_seed_addrs(struct wireaddr_internal **addrs,
 			   struct sockaddr *broken_reply)
 {
 	struct wireaddr *new_addrs;
-	const char **hostnames;
-
-	new_addrs = tal_arr(tmpctx, struct wireaddr, 0);
-	hostnames = seednames(tmpctx, id);
+	const char **hostnames = seednames(tmpctx, id);
 
 	for (size_t i = 0; i < tal_count(hostnames); i++) {
 		status_debug("Resolving %s", hostnames[i]);
-		if (!wireaddr_from_hostname(&new_addrs, hostnames[i], DEFAULT_PORT, NULL,
-				    	broken_reply, NULL)) {
-			status_debug("Could not resolve %s", hostnames[i]);
-		} else {
+		new_addrs = wireaddr_from_hostname(tmpctx, hostnames[i], DEFAULT_PORT,
+		                                   NULL, broken_reply, NULL);
+		if (new_addrs) {
 			for (size_t i = 0; i < tal_count(new_addrs); i++) {
 				struct wireaddr_internal a;
 				a.itype = ADDR_INTERNAL_WIREADDR;
 				a.u.wireaddr = new_addrs[i];
 				status_debug("Resolved %s to %s", hostnames[i],
-				     	type_to_string(tmpctx, struct wireaddr,
-						    	&a.u.wireaddr));
+				             type_to_string(tmpctx, struct wireaddr,
+				                            &a.u.wireaddr));
 				tal_arr_expand(addrs, a);
 			}
-		}
+		} else
+			status_debug("Could not resolve %s", hostnames[i]);
 	}
 }
 

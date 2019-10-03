@@ -115,9 +115,12 @@ class Field(object):
         return ', const {} *{}'.format(type_name, self.name)
 
     def arg_desc_from(self):
+        type_name = self.type_obj.type_name()
+        if self.type_obj.is_const_ptr_ptr_type():
+            return ', const {} **{}'.format(type_name, self.name)
+
         if self.len_field_of:
             return ''
-        type_name = self.type_obj.type_name()
         if self.is_array():
             return ', {} {}[{}]'.format(type_name, self.name, self.count)
         ptrs = '*'
@@ -217,6 +220,7 @@ class Type(FieldSet):
         'wirestring',
         'per_peer_state',
         'bitcoin_tx_output',
+        'exclude_entry',
     ]
 
     # Some BOLT types are re-typed based on their field name
@@ -242,6 +246,12 @@ class Type(FieldSet):
         'point': 'pubkey',
         # FIXME: omits 'pad'
     }
+
+    # Types that are const pointer-to-pointers, such as chainparams, i.e.,
+    # they set a reference to some const entry.
+    const_ptr_ptr_types = [
+        'chainparams'
+    ]
 
     @staticmethod
     def true_type(type_name, field_name=None, outer_name=None):
@@ -306,6 +316,9 @@ class Type(FieldSet):
 
     def is_subtype(self):
         return bool(self.fields)
+
+    def is_const_ptr_ptr_type(self):
+        return self.name in self.const_ptr_ptr_types
 
     def is_truncated(self):
         return self.name in self.truncated_typedefs

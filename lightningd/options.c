@@ -44,6 +44,11 @@
 bool deprecated_apis = true;
 static bool opt_table_alloced = false;
 
+/* Declare opt_add_addr here, because we we call opt_add_addr
+ * and opt_announce_addr vice versa
+*/
+static char *opt_add_addr(const char *arg, struct lightningd *ld);
+
 /* Tal wrappers for opt. */
 static void *opt_allocfn(size_t size)
 {
@@ -149,21 +154,17 @@ static char *opt_add_addr_withtype(const char *arg,
 
 }
 
-static char *opt_add_addr(const char *arg, struct lightningd *ld)
-{
-	return opt_add_addr_withtype(arg, ld, ADDR_LISTEN_AND_ANNOUNCE, true);
-}
-
-static char *opt_add_bind_addr(const char *arg, struct lightningd *ld)
-{
-	return opt_add_addr_withtype(arg, ld, ADDR_LISTEN, true);
-}
-
 static char *opt_add_announce_addr(const char *arg, struct lightningd *ld)
 {
 	const struct wireaddr *wn;
 	size_t n = tal_count(ld->proposed_wireaddr);
-	char *err = opt_add_addr_withtype(arg, ld, ADDR_ANNOUNCE, false);
+	char *err;
+
+	/* Check for autotor and reroute the call to --addr  */
+	if (strstarts(arg, "autotor:"))
+		return opt_add_addr(arg, ld);
+
+	err = opt_add_addr_withtype(arg, ld, ADDR_ANNOUNCE, false);
 	if (err)
 		return err;
 
@@ -193,6 +194,46 @@ static char *opt_add_announce_addr(const char *arg, struct lightningd *ld)
 	return NULL;
 }
 
+static char *opt_add_addr(const char *arg, struct lightningd *ld)
+{
+	struct wireaddr_internal addr;
+
+	/* handle in case you used the addr option with an .onion */
+	if (parse_wireaddr_internal(arg, &addr, 0, true, false, true, NULL)) {
+		if (addr.itype == ADDR_INTERNAL_WIREADDR && (
+			addr.u.wireaddr.type == ADDR_TYPE_TOR_V2 ||
+			addr.u.wireaddr.type == ADDR_TYPE_TOR_V3)) {
+				log_unusual(ld->log, "You used `--addr=%s` option with an .onion address, please use"
+							" `--announce-addr` ! You are lucky in this node live some wizards and"
+							" fairies, we have done this for you and announce, Be as hidden as wished",
+							arg);
+				return opt_add_announce_addr(arg, ld);
+		}
+	}
+	/* the intended call */
+	return opt_add_addr_withtype(arg, ld, ADDR_LISTEN_AND_ANNOUNCE, true);
+}
+
+static char *opt_add_bind_addr(const char *arg, struct lightningd *ld)
+{
+	struct wireaddr_internal addr;
+
+	/* handle in case you used the bind option with an .onion */
+	if (parse_wireaddr_internal(arg, &addr, 0, true, false, true, NULL)) {
+		if (addr.itype == ADDR_INTERNAL_WIREADDR && (
+			addr.u.wireaddr.type == ADDR_TYPE_TOR_V2 ||
+			addr.u.wireaddr.type == ADDR_TYPE_TOR_V3)) {
+				log_unusual(ld->log, "You used `--bind-addr=%s` option with an .onion address,"
+							" You are lucky in this node live some wizards and"
+							" fairies, we have done this for you and don't announce, Be as hidden as wished",
+							arg);
+				return NULL;
+		}
+	}
+	/* the intended call */
+	return opt_add_addr_withtype(arg, ld, ADDR_LISTEN, true);
+}
+
 static void opt_show_u64(char buf[OPT_SHOW_LEN], const u64 *u)
 {
 	snprintf(buf, OPT_SHOW_LEN, "%"PRIu64, *u);
@@ -211,7 +252,10 @@ static char *opt_set_network(const char *arg, struct lightningd *ld)
 {
 	assert(arg != NULL);
 
-	ld->topology->bitcoind->chainparams = chainparams_for_network(arg);
+	/* Set the global chainparams instance */
+	chainparams = chainparams_for_network(arg);
+
+	ld->topology->bitcoind->chainparams = chainparams;
 	if (!ld->topology->bitcoind->chainparams)
 		return tal_fmt(NULL, "Unknown network name '%s'", arg);
 	return NULL;
@@ -398,9 +442,6 @@ static void dev_register_opts(struct lightningd *ld)
 			   "Disable automatic reconnect-attempts by this node, but accept incoming");
 	opt_register_noarg("--dev-fail-on-subdaemon-fail", opt_set_bool,
 			   &ld->dev_subdaemon_fail, opt_hidden);
-	opt_register_arg("--dev-broadcast-interval=<ms>", opt_set_uintval,
-			 opt_show_uintval, &ld->config.broadcast_interval_msec,
-			 "Time between gossip broadcasts in milliseconds");
 	opt_register_arg("--dev-disconnect=<filename>", opt_subd_dev_disconnect,
 			 NULL, ld, "File containing disconnection points");
 	opt_register_noarg("--dev-allow-localhost", opt_set_bool,
@@ -417,10 +458,12 @@ static void dev_register_opts(struct lightningd *ld)
 			 "fee fluctuations, large values may result in large "
 			 "fees.");
 
-	opt_register_arg(
-	    "--dev-channel-update-interval=<s>", opt_set_u32, opt_show_u32,
-	    &ld->config.channel_update_interval,
-	    "Time in seconds between channel updates for our own channels.");
+	opt_register_noarg("--dev-fast-gossip", opt_set_bool,
+			   &ld->dev_fast_gossip,
+			   "Make gossip broadcast 1 second, etc");
+	opt_register_noarg("--dev-fast-gossip-prune", opt_set_bool,
+			   &ld->dev_fast_gossip_prune,
+			   "Make gossip pruning 30 seconds");
 
 	opt_register_arg("--dev-gossip-time", opt_set_u32, opt_show_u32,
 			 &ld->dev_gossip_time,
@@ -473,16 +516,6 @@ static const struct config testnet_config = {
 	/* Take 0.001% */
 	.fee_per_satoshi = 10,
 
-	/* BOLT #7:
-	 *
-	 *   - SHOULD flush outgoing gossip messages once every 60
-	 *     seconds, independently of the arrival times of the messages.
-	 */
-	.broadcast_interval_msec = 60000,
-
-	/* Send a keepalive update at least every week, prune every twice that */
-	.channel_update_interval = 1209600/2,
-
 	/* Testnet sucks */
 	.ignore_fee_limits = true,
 
@@ -496,6 +529,8 @@ static const struct config testnet_config = {
 
 	/* Sets min_effective_htlc_capacity - at 1000$/BTC this is 10ct */
 	.min_capacity_sat = 10000,
+
+	.use_v3_autotor = true,
 };
 
 /* aka. "Dude, where's my coins?" */
@@ -542,16 +577,6 @@ static const struct config mainnet_config = {
 	/* Take 0.001% */
 	.fee_per_satoshi = 10,
 
-	/* BOLT #7:
-	 *
-	 *   - SHOULD flush outgoing gossip messages once every 60
-	 *     seconds, independently of the arrival times of the messages.
-	 */
-	.broadcast_interval_msec = 60000,
-
-	/* Send a keepalive update at least every week, prune every twice that */
-	.channel_update_interval = 1209600/2,
-
 	/* Mainnet should have more stable fees */
 	.ignore_fee_limits = false,
 
@@ -565,6 +590,8 @@ static const struct config mainnet_config = {
 
 	/* Sets min_effective_htlc_capacity - at 1000$/BTC this is 10ct */
 	.min_capacity_sat = 10000,
+
+	.use_v3_autotor = true,
 };
 
 static void check_config(struct lightningd *ld)
@@ -832,6 +859,11 @@ static void handle_minimal_config_opts(struct lightningd *ld,
 			       opt_ignore_talstr, opt_show_charp,
 			       &ld->config_dir,
 			       "Set working directory. All other files are relative to this");
+
+	ld->wallet_dsn = tal_fmt(ld, "sqlite3://%s/lightningd.sqlite3", ld->config_dir);
+	opt_register_early_arg("--wallet", opt_set_talstr, NULL,
+			       &ld->wallet_dsn,
+			       "Location of the wallet database.");
 }
 
 static void register_opts(struct lightningd *ld)
@@ -991,6 +1023,9 @@ static void register_opts(struct lightningd *ld)
 
 	opt_register_noarg("--disable-dns", opt_set_invbool, &ld->config.use_dns,
 			   "Disable DNS lookups of peers");
+
+	opt_register_noarg("--enable-autotor-v2-mode", opt_set_invbool, &ld->config.use_v3_autotor,
+			   "Try to get a v2 onion address from the Tor service call, default is v3");
 
 	opt_register_logging(ld);
 	opt_register_version();

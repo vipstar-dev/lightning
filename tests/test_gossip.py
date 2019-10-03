@@ -1,4 +1,6 @@
+from collections import Counter
 from fixtures import *  # noqa: F401,F403
+from fixtures import TEST_NETWORK
 from lightning import RpcError
 from utils import wait_for, TIMEOUT, only_one, sync_blockheight
 
@@ -18,12 +20,11 @@ with open('config.vars') as configfile:
 DEVELOPER = os.getenv("DEVELOPER", config['DEVELOPER']) == "1"
 
 
-@unittest.skipIf(not DEVELOPER, "needs --dev-broadcast-interval, --dev-channelupdate-interval")
+@unittest.skipIf(not DEVELOPER, "needs --dev-fast-gossip-prune")
 def test_gossip_pruning(node_factory, bitcoind):
     """ Create channel and see it being updated in time before pruning
     """
-    opts = {'dev-channel-update-interval': 5}
-    l1, l2, l3 = node_factory.get_nodes(3, opts)
+    l1, l2, l3 = node_factory.get_nodes(3, opts={'dev-fast-gossip-prune': None})
 
     l1.rpc.connect(l2.info['id'], 'localhost', l2.port)
     l2.rpc.connect(l3.info['id'], 'localhost', l3.port)
@@ -38,10 +39,10 @@ def test_gossip_pruning(node_factory, bitcoind):
     wait_for(lambda: [c['active'] for c in l2.rpc.listchannels()['channels']] == [True] * 4)
     wait_for(lambda: [c['active'] for c in l3.rpc.listchannels()['channels']] == [True] * 4)
 
-    # All of them should send a keepalive message
+    # All of them should send a keepalive message (after 30 seconds)
     l1.daemon.wait_for_logs([
         'Sending keepalive channel_update for {}'.format(scid1),
-    ])
+    ], timeout=50)
     l2.daemon.wait_for_logs([
         'Sending keepalive channel_update for {}'.format(scid1),
         'Sending keepalive channel_update for {}'.format(scid2),
@@ -50,26 +51,21 @@ def test_gossip_pruning(node_factory, bitcoind):
         'Sending keepalive channel_update for {}'.format(scid2),
     ])
 
-    # Now kill l3, so that l2 and l1 can prune it from their view after 10 seconds
+    # Now kill l2, so that l1 and l3 will prune from their view after 60 seconds
+    l2.stop()
 
-    # FIXME: This sleep() masks a real bug: that channeld sends a
-    # channel_update message (to disable the channel) with same
-    # timestamp as the last keepalive, and thus is ignored.  The minimal
-    # fix is to backdate the keepalives 1 second, but maybe we should
-    # simply have gossipd generate all updates?
-    time.sleep(1)
-    l3.stop()
-
-    l1.daemon.wait_for_log("Pruning channel {} from network view".format(scid2))
-    l2.daemon.wait_for_log("Pruning channel {} from network view".format(scid2))
+    # We check every 60/4 seconds, and takes 60 seconds since last update.
+    l1.daemon.wait_for_log("Pruning channel {} from network view".format(scid2),
+                           timeout=80)
+    l3.daemon.wait_for_log("Pruning channel {} from network view".format(scid1))
 
     assert scid2 not in [c['short_channel_id'] for c in l1.rpc.listchannels()['channels']]
-    assert scid2 not in [c['short_channel_id'] for c in l2.rpc.listchannels()['channels']]
+    assert scid1 not in [c['short_channel_id'] for c in l3.rpc.listchannels()['channels']]
     assert l3.info['id'] not in [n['nodeid'] for n in l1.rpc.listnodes()['nodes']]
-    assert l3.info['id'] not in [n['nodeid'] for n in l2.rpc.listnodes()['nodes']]
+    assert l1.info['id'] not in [n['nodeid'] for n in l3.rpc.listnodes()['nodes']]
 
 
-@unittest.skipIf(not DEVELOPER, "needs --dev-broadcast-interval, --dev-no-reconnect")
+@unittest.skipIf(not DEVELOPER, "needs --dev-fast-gossip, --dev-no-reconnect")
 def test_gossip_disable_channels(node_factory, bitcoind):
     """Simple test to check that channels get disabled correctly on disconnect and
     reenabled upon reconnecting
@@ -138,14 +134,11 @@ def test_announce_address(node_factory, bitcoind):
 
 @unittest.skipIf(not DEVELOPER, "needs DEVELOPER=1")
 def test_gossip_timestamp_filter(node_factory, bitcoind):
-    # Need full IO logging so we can see gossip (from gossipd and channeld)
-    l1, l2, l3 = node_factory.line_graph(3, opts={'log-level': 'io'}, fundchannel=False)
+    # Updates get backdated 5 seconds with --dev-fast-gossip.
+    backdate = 5
+    l1, l2, l3 = node_factory.line_graph(3, fundchannel=False)
 
-    # Full IO logging for connectds
-    subprocess.run(['kill', '-USR1', l1.subd_pid('connectd')])
-    subprocess.run(['kill', '-USR1', l2.subd_pid('connectd')])
-
-    before_anything = int(time.time() - 1.0)
+    before_anything = int(time.time())
 
     # Make a public channel.
     chan12 = l1.fund_channel(l2, 10**5)
@@ -153,10 +146,9 @@ def test_gossip_timestamp_filter(node_factory, bitcoind):
 
     l3.wait_for_channel_updates([chan12])
     after_12 = int(time.time())
-    # Full IO logging for l1's channeld
-    subprocess.run(['kill', '-USR1', l1.subd_pid('channeld')])
 
     # Make another one, different timestamp.
+    time.sleep(1)
     chan23 = l2.fund_channel(l3, 10**5)
     bitcoind.generate_block(5)
 
@@ -166,55 +158,48 @@ def test_gossip_timestamp_filter(node_factory, bitcoind):
     # Make sure l1 has received all the gossip.
     wait_for(lambda: ['alias' in node for node in l1.rpc.listnodes()['nodes']] == [True, True, True])
 
-    # l1 sets broad timestamp, will receive info about both channels again.
-    l1.rpc.dev_send_timestamp_filter(id=l2.info['id'],
-                                     first=0,
-                                     range=0xFFFFFFFF)
-    before_sendfilter = l1.daemon.logsearch_start
+    msgs = l1.query_gossip('gossip_timestamp_filter',
+                           '06226e46111a0b59caaf126043eb5bbf28c34f3a5e332a1fc7b2b73cf188910f',
+                           '0', '0xFFFFFFFF')
 
     # 0x0100 = channel_announcement
     # 0x0102 = channel_update
     # 0x0101 = node_announcement
     # The order of node_announcements relative to others is undefined.
-    l1.daemon.wait_for_logs([r'\[IN\] 0102',
-                             r'\[IN\] 0102',
-                             r'\[IN\] 0100',
-                             r'\[IN\] 0100',
-                             r'\[IN\] 0102',
-                             r'\[IN\] 0102',
-                             r'\[IN\] 0101',
-                             r'\[IN\] 0101',
-                             r'\[IN\] 0101'])
+    types = Counter([m[0:4] for m in msgs])
+    assert types == Counter(['0100'] * 2 + ['0102'] * 4 + ['0101'] * 3)
 
     # Now timestamp which doesn't overlap (gives nothing).
-    before_sendfilter = l1.daemon.logsearch_start
-    l1.rpc.dev_send_timestamp_filter(id=l2.info['id'],
-                                     first=0,
-                                     range=before_anything)
-    time.sleep(1)
-    assert not l1.daemon.is_in_log(r'\[IN\] 0100', before_sendfilter)
+    msgs = l1.query_gossip('gossip_timestamp_filter',
+                           '06226e46111a0b59caaf126043eb5bbf28c34f3a5e332a1fc7b2b73cf188910f',
+                           '0', before_anything - backdate)
+    assert msgs == []
 
     # Now choose range which will only give first update.
-    l1.rpc.dev_send_timestamp_filter(id=l2.info['id'],
-                                     first=before_anything,
-                                     range=after_12 - before_anything + 1)
+    msgs = l1.query_gossip('gossip_timestamp_filter',
+                           '06226e46111a0b59caaf126043eb5bbf28c34f3a5e332a1fc7b2b73cf188910f',
+                           before_anything - backdate,
+                           after_12 - before_anything + 1)
+
     # 0x0100 = channel_announcement
-    l1.daemon.wait_for_log(r'\[IN\] 0100')
     # 0x0102 = channel_update
     # (Node announcement may have any timestamp)
-    l1.daemon.wait_for_log(r'\[IN\] 0102')
-    l1.daemon.wait_for_log(r'\[IN\] 0102')
+    types = Counter([m[0:4] for m in msgs])
+    assert types['0100'] == 1
+    assert types['0102'] == 2
 
     # Now choose range which will only give second update.
-    l1.rpc.dev_send_timestamp_filter(id=l2.info['id'],
-                                     first=after_12,
-                                     range=after_23 - after_12 + 1)
+    msgs = l1.query_gossip('gossip_timestamp_filter',
+                           '06226e46111a0b59caaf126043eb5bbf28c34f3a5e332a1fc7b2b73cf188910f',
+                           after_12 - backdate,
+                           after_23 - after_12 + 1)
+
     # 0x0100 = channel_announcement
-    l1.daemon.wait_for_log(r'\[IN\] 0100')
     # 0x0102 = channel_update
     # (Node announcement may have any timestamp)
-    l1.daemon.wait_for_log(r'\[IN\] 0102')
-    l1.daemon.wait_for_log(r'\[IN\] 0102')
+    types = Counter([m[0:4] for m in msgs])
+    assert types['0100'] == 1
+    assert types['0102'] == 2
 
 
 @unittest.skipIf(not DEVELOPER, "needs --dev-allow-localhost")
@@ -325,7 +310,7 @@ def test_gossip_jsonrpc(node_factory):
     assert [c['public'] for c in l2.rpc.listchannels()['channels']] == [True, True]
 
 
-@unittest.skipIf(not DEVELOPER, "needs DEVELOPER=1 for --dev-broadcast-interval")
+@unittest.skipIf(not DEVELOPER, "Too slow without --dev-fast-gossip")
 def test_gossip_badsig(node_factory):
     """Make sure node announcement signatures are ok.
 
@@ -516,7 +501,7 @@ def test_gossip_no_empty_announcements(node_factory, bitcoind):
     wait_for(lambda: len(l1.rpc.listchannels()['channels']) == 2)
 
 
-@unittest.skipIf(not DEVELOPER, "needs DEVELOPER=1 for --dev-broadcast-interval")
+@unittest.skipIf(not DEVELOPER, "Too slow without --dev-fast-gossip")
 def test_routing_gossip(node_factory, bitcoind):
     nodes = node_factory.get_nodes(5)
 
@@ -550,10 +535,9 @@ def test_routing_gossip(node_factory, bitcoind):
         wait_for(lambda: check_gossip(n))
 
 
-@unittest.skipIf(not DEVELOPER, "needs DEVELOPER=1")
+@unittest.skipIf(not DEVELOPER, "needs dev-set-max-scids-encode-size")
 def test_gossip_query_channel_range(node_factory, bitcoind):
-    l1, l2, l3, l4 = node_factory.line_graph(4, opts={'log-level': 'io'},
-                                             fundchannel=False)
+    l1, l2, l3, l4 = node_factory.line_graph(4, fundchannel=False)
 
     # Make public channels on consecutive blocks
     l1.fundwallet(10**6)
@@ -583,110 +567,159 @@ def test_gossip_query_channel_range(node_factory, bitcoind):
 
     assert block23 == block12 + 1
 
-    # l1 asks for all channels, gets both.
-    ret = l1.rpc.dev_query_channel_range(id=l2.info['id'],
-                                         first=0,
-                                         num=1000000)
-
-    assert ret['final_first_block'] == 0
-    assert ret['final_num_blocks'] == 1000000
-    assert ret['final_complete']
-    assert len(ret['short_channel_ids']) == 2
-    assert ret['short_channel_ids'][0] == scid12
-    assert ret['short_channel_ids'][1] == scid23
+    # Asks l2 for all channels, gets both.
+    msgs = l2.query_gossip('query_channel_range',
+                           '06226e46111a0b59caaf126043eb5bbf28c34f3a5e332a1fc7b2b73cf188910f',
+                           0, 1000000)
+    encoded = subprocess.run(['devtools/mkencoded', '--scids', '00', scid12, scid23],
+                             check=True,
+                             timeout=TIMEOUT,
+                             stdout=subprocess.PIPE).stdout.strip().decode()
+    # reply_channel_range == 264
+    assert msgs == ['0108'
+                    # blockhash
+                    '06226e46111a0b59caaf126043eb5bbf28c34f3a5e332a1fc7b2b73cf188910f'
+                    # first_blocknum, number_of_blocks, complete
+                    + format(0, '08x') + format(1000000, '08x') + '01'
+                    # encoded_short_ids
+                    + format(len(encoded) // 2, '04x')
+                    + encoded]
 
     # Does not include scid12
-    ret = l1.rpc.dev_query_channel_range(id=l2.info['id'],
-                                         first=0,
-                                         num=block12)
-    assert ret['final_first_block'] == 0
-    assert ret['final_num_blocks'] == block12
-    assert ret['final_complete']
-    assert len(ret['short_channel_ids']) == 0
+    msgs = l2.query_gossip('query_channel_range',
+                           '06226e46111a0b59caaf126043eb5bbf28c34f3a5e332a1fc7b2b73cf188910f',
+                           0, block12)
+    # reply_channel_range == 264
+    assert msgs == ['0108'
+                    # blockhash
+                    '06226e46111a0b59caaf126043eb5bbf28c34f3a5e332a1fc7b2b73cf188910f'
+                    # first_blocknum, number_of_blocks, complete
+                    + format(0, '08x') + format(block12, '08x') + '01'
+                    # encoded_short_ids
+                    '000100']
 
     # Does include scid12
-    ret = l1.rpc.dev_query_channel_range(id=l2.info['id'],
-                                         first=0,
-                                         num=block12 + 1)
-    assert ret['final_first_block'] == 0
-    assert ret['final_num_blocks'] == block12 + 1
-    assert ret['final_complete']
-    assert len(ret['short_channel_ids']) == 1
-    assert ret['short_channel_ids'][0] == scid12
+    msgs = l2.query_gossip('query_channel_range',
+                           '06226e46111a0b59caaf126043eb5bbf28c34f3a5e332a1fc7b2b73cf188910f',
+                           0, block12 + 1)
+    encoded = subprocess.run(['devtools/mkencoded', '--scids', '00', scid12],
+                             check=True,
+                             timeout=TIMEOUT,
+                             stdout=subprocess.PIPE).stdout.strip().decode()
+    # reply_channel_range == 264
+    assert msgs == ['0108'
+                    # blockhash
+                    '06226e46111a0b59caaf126043eb5bbf28c34f3a5e332a1fc7b2b73cf188910f'
+                    # first_blocknum, number_of_blocks, complete
+                    + format(0, '08x') + format(block12 + 1, '08x') + '01'
+                    # encoded_short_ids
+                    + format(len(encoded) // 2, '04x')
+                    + encoded]
 
     # Doesn't include scid23
-    ret = l1.rpc.dev_query_channel_range(id=l2.info['id'],
-                                         first=0,
-                                         num=block23)
-    assert ret['final_first_block'] == 0
-    assert ret['final_num_blocks'] == block23
-    assert ret['final_complete']
-    assert len(ret['short_channel_ids']) == 1
-    assert ret['short_channel_ids'][0] == scid12
+    msgs = l2.query_gossip('query_channel_range',
+                           '06226e46111a0b59caaf126043eb5bbf28c34f3a5e332a1fc7b2b73cf188910f',
+                           0, block23)
+    encoded = subprocess.run(['devtools/mkencoded', '--scids', '00', scid12],
+                             check=True,
+                             timeout=TIMEOUT,
+                             stdout=subprocess.PIPE).stdout.strip().decode()
+    # reply_channel_range == 264
+    assert msgs == ['0108'
+                    # blockhash
+                    '06226e46111a0b59caaf126043eb5bbf28c34f3a5e332a1fc7b2b73cf188910f'
+                    # first_blocknum, number_of_blocks, complete
+                    + format(0, '08x') + format(block23, '08x') + '01'
+                    # encoded_short_ids
+                    + format(len(encoded) // 2, '04x')
+                    + encoded]
 
     # Does include scid23
-    ret = l1.rpc.dev_query_channel_range(id=l2.info['id'],
-                                         first=block12,
-                                         num=block23 - block12 + 1)
-    assert ret['final_first_block'] == block12
-    assert ret['final_num_blocks'] == block23 - block12 + 1
-    assert ret['final_complete']
-    assert len(ret['short_channel_ids']) == 2
-    assert ret['short_channel_ids'][0] == scid12
-    assert ret['short_channel_ids'][1] == scid23
+    msgs = l2.query_gossip('query_channel_range',
+                           '06226e46111a0b59caaf126043eb5bbf28c34f3a5e332a1fc7b2b73cf188910f',
+                           block12, block23 - block12 + 1)
+    encoded = subprocess.run(['devtools/mkencoded', '--scids', '00', scid12, scid23],
+                             check=True,
+                             timeout=TIMEOUT,
+                             stdout=subprocess.PIPE).stdout.strip().decode()
+    # reply_channel_range == 264
+    assert msgs == ['0108'
+                    # blockhash
+                    '06226e46111a0b59caaf126043eb5bbf28c34f3a5e332a1fc7b2b73cf188910f'
+                    # first_blocknum, number_of_blocks, complete
+                    + format(block12, '08x') + format(block23 - block12 + 1, '08x') + '01'
+                    # encoded_short_ids
+                    + format(len(encoded) // 2, '04x')
+                    + encoded]
 
     # Only includes scid23
-    ret = l1.rpc.dev_query_channel_range(id=l2.info['id'],
-                                         first=block23,
-                                         num=1)
-    assert ret['final_first_block'] == block23
-    assert ret['final_num_blocks'] == 1
-    assert ret['final_complete']
-    assert len(ret['short_channel_ids']) == 1
-    assert ret['short_channel_ids'][0] == scid23
+    msgs = l2.query_gossip('query_channel_range',
+                           '06226e46111a0b59caaf126043eb5bbf28c34f3a5e332a1fc7b2b73cf188910f',
+                           block23, 1)
+    encoded = subprocess.run(['devtools/mkencoded', '--scids', '00', scid23],
+                             check=True,
+                             timeout=TIMEOUT,
+                             stdout=subprocess.PIPE).stdout.strip().decode()
+    # reply_channel_range == 264
+    assert msgs == ['0108'
+                    # blockhash
+                    '06226e46111a0b59caaf126043eb5bbf28c34f3a5e332a1fc7b2b73cf188910f'
+                    # first_blocknum, number_of_blocks, complete
+                    + format(block23, '08x') + format(1, '08x') + '01'
+                    # encoded_short_ids
+                    + format(len(encoded) // 2, '04x')
+                    + encoded]
 
     # Past both
-    ret = l1.rpc.dev_query_channel_range(id=l2.info['id'],
-                                         first=block23 + 1,
-                                         num=1000000)
-    assert ret['final_first_block'] == block23 + 1
-    assert ret['final_num_blocks'] == 1000000
-    assert ret['final_complete']
-    assert len(ret['short_channel_ids']) == 0
-
-    # Turn on IO logging in l1 channeld.
-    subprocess.run(['kill', '-USR1', l1.subd_pid('channeld')])
+    msgs = l2.query_gossip('query_channel_range',
+                           '06226e46111a0b59caaf126043eb5bbf28c34f3a5e332a1fc7b2b73cf188910f',
+                           block23 + 1, 1000000)
+    # reply_channel_range == 264
+    assert msgs == ['0108'
+                    # blockhash
+                    '06226e46111a0b59caaf126043eb5bbf28c34f3a5e332a1fc7b2b73cf188910f'
+                    # first_blocknum, number_of_blocks, complete
+                    + format(block23 + 1, '08x') + format(1000000, '08x') + '01'
+                    # encoded_short_ids
+                    + '000100']
 
     # Make l2 split reply into two (technically async)
     l2.rpc.dev_set_max_scids_encode_size(max=9)
     l2.daemon.wait_for_log('Set max_scids_encode_bytes to 9')
-    ret = l1.rpc.dev_query_channel_range(id=l2.info['id'],
-                                         first=0,
-                                         num=1000000)
 
-    # Turns out it sends: 0+53, 53+26, 79+13, 92+7, 99+3, 102+2, 104+1, 105+999895
-    l1.daemon.wait_for_logs([r'\[IN\] 0108'] * 8)
-
+    msgs = l2.query_gossip('query_channel_range',
+                           '06226e46111a0b59caaf126043eb5bbf28c34f3a5e332a1fc7b2b73cf188910f',
+                           0, 1000000)
     # It should definitely have split
-    assert ret['final_first_block'] != 0 or ret['final_num_blocks'] != 1000000
-    assert ret['final_complete']
-    assert len(ret['short_channel_ids']) == 2
-    assert ret['short_channel_ids'][0] == scid12
-    assert ret['short_channel_ids'][1] == scid23
     l2.daemon.wait_for_log('queue_channel_ranges full: splitting')
+    # Turns out it sends: 0+53, 53+26, 79+13, 92+7, 99+3, 102+2, 104+1, 105+999895
+    start = 0
+    scids = '00'
+    for m in msgs:
+        assert m.startswith('0108'
+                            # blockhash
+                            '06226e46111a0b59caaf126043eb5bbf28c34f3a5e332a1fc7b2b73cf188910f')
+        this_start = int(m[4 + 64:4 + 64 + 8], base=16)
+        num = int(m[4 + 64 + 8:4 + 64 + 8 + 8], base=16)
+        # Pull off end of packet, assume it's uncompressed, and no TLVs!
+        scids += m[4 + 64 + 8 + 8 + 2 + 4 + 2:]
+        assert this_start == start
+        start += num
+
+    encoded = subprocess.run(['devtools/mkencoded', '--scids', '00', scid12, scid23],
+                             check=True,
+                             timeout=TIMEOUT,
+                             stdout=subprocess.PIPE).stdout.strip().decode()
+    assert scids == encoded
 
     # Test overflow case doesn't split forever; should still only get 8 for this
-    ret = l1.rpc.dev_query_channel_range(id=l2.info['id'],
-                                         first=1,
-                                         num=429496000)
-    l1.daemon.wait_for_logs([r'\[IN\] 0108'] * 8)
-
-    # And no more!
-    time.sleep(1)
-    assert not l1.daemon.is_in_log(r'\[IN\] 0108', start=l1.daemon.logsearch_start)
+    msgs = l2.query_gossip('query_channel_range',
+                           '06226e46111a0b59caaf126043eb5bbf28c34f3a5e332a1fc7b2b73cf188910f',
+                           1, 429496000)
+    assert len(msgs) == 8
 
     # This should actually be large enough for zlib to kick in!
-    l3.fund_channel(l4, 10**5)
+    scid34 = l3.fund_channel(l4, 10**5)
     bitcoind.generate_block(5)
     l2.daemon.wait_for_log('Received node_announcement for node ' + l4.info['id'])
 
@@ -695,25 +728,22 @@ def test_gossip_query_channel_range(node_factory, bitcoind):
     l2.daemon.wait_for_log('Set max_scids_encode_bytes to {}'
                            .format(2**32 - 1))
 
-    ret = l1.rpc.dev_query_channel_range(id=l2.info['id'],
-                                         first=0,
-                                         num=65535)
-    l1.daemon.wait_for_log(
-        # WIRE_REPLY_CHANNEL_RANGE
-        r'\[IN\] 0108'
-        # chain_hash
-        + '................................................................'
-        # first_blocknum
-        + '00000000'
-        # number_of_blocks
-        + '0000ffff'
-        # complete
-        + '01'
-        # length
-        + '....'
-        # encoding
-        + '01'
-    )
+    msgs = l2.query_gossip('query_channel_range',
+                           '06226e46111a0b59caaf126043eb5bbf28c34f3a5e332a1fc7b2b73cf188910f',
+                           0, 65535)
+    encoded = subprocess.run(['devtools/mkencoded', '--scids', '01', scid12, scid23, scid34],
+                             check=True,
+                             timeout=TIMEOUT,
+                             stdout=subprocess.PIPE).stdout.strip().decode()
+    # reply_channel_range == 264
+    assert msgs == ['0108'
+                    # blockhash
+                    '06226e46111a0b59caaf126043eb5bbf28c34f3a5e332a1fc7b2b73cf188910f'
+                    # first_blocknum, number_of_blocks, complete
+                    + format(0, '08x') + format(65535, '08x') + '01'
+                    # encoded_short_ids
+                    + format(len(encoded) // 2, '04x')
+                    + encoded]
 
 
 # Long test involving 4 lightningd instances.
@@ -757,6 +787,8 @@ def test_report_routing_failure(node_factory, bitcoind):
     channels = []
     for src, dst in [(l1, l2), (l2, l3), (l3, l4), (l4, l1), (l4, l2)]:
         src.rpc.connect(dst.info['id'], 'localhost', dst.port)
+        print("src={}, dst={}".format(src.daemon.lightning_dir,
+                                      dst.daemon.lightning_dir))
         channels.append(src.fund_channel(dst, 10**6))
     bitcoind.generate_block(5)
 
@@ -768,23 +800,25 @@ def test_report_routing_failure(node_factory, bitcoind):
     l1.rpc.pay(inv)
 
 
-@unittest.skipIf(not DEVELOPER, "needs DEVELOPER=1")
+@unittest.skipIf(not DEVELOPER, "needs fast gossip")
 def test_query_short_channel_id(node_factory, bitcoind):
-    l1 = node_factory.get_node(options={'log-level': 'io'})
-    l2 = node_factory.get_node()
-    l3 = node_factory.get_node()
+    l1, l2, l3 = node_factory.get_nodes(3)
     l1.rpc.connect(l2.info['id'], 'localhost', l2.port)
     l2.rpc.connect(l3.info['id'], 'localhost', l3.port)
 
-    # Need full IO logging so we can see gossip (from openingd and channeld)
-    l1.daemon.wait_for_log('openingd-.*: Handed peer, entering loop')
-    subprocess.run(['kill', '-USR1', l1.subd_pid('openingd')])
-
     # Empty result tests.
-    reply = l1.rpc.dev_query_scids(l2.info['id'], ['1x1x1', '2x2x2'])
-    # 0x0105 = query_short_channel_ids
-    l1.daemon.wait_for_log(r'\[OUT\] 0105.*0000000100000100010000020000020002')
-    assert reply['complete']
+    encoded = subprocess.run(['devtools/mkencoded', '--scids', '00', '1x1x1', '2x2x2'],
+                             check=True,
+                             timeout=TIMEOUT,
+                             stdout=subprocess.PIPE).stdout.strip().decode()
+
+    msgs = l1.query_gossip('query_short_channel_ids',
+                           '06226e46111a0b59caaf126043eb5bbf28c34f3a5e332a1fc7b2b73cf188910f',
+                           encoded)
+    # Should just get the WIRE_REPLY_SHORT_CHANNEL_IDS_END = 262
+    # (with chainhash and completeflag = 1)
+    assert len(msgs) == 1
+    assert msgs[0] == '010606226e46111a0b59caaf126043eb5bbf28c34f3a5e332a1fc7b2b73cf188910f01'
 
     # Make channels public.
     scid12 = l1.fund_channel(l2, 10**5)
@@ -793,39 +827,52 @@ def test_query_short_channel_id(node_factory, bitcoind):
 
     # It will know about everything.
     l1.daemon.wait_for_log('Received node_announcement for node {}'.format(l3.info['id']))
-    subprocess.run(['kill', '-USR1', l1.subd_pid('channeld')])
 
     # This query should get channel announcements, channel updates, and node announcements.
-    reply = l1.rpc.dev_query_scids(l2.info['id'], [scid23])
-    # 0x0105 = query_short_channel_ids
-    l1.daemon.wait_for_log(r'\[OUT\] 0105')
-    assert reply['complete']
+    encoded = subprocess.run(['devtools/mkencoded', '--scids', '00', scid23],
+                             check=True,
+                             timeout=TIMEOUT,
+                             stdout=subprocess.PIPE).stdout.strip().decode()
+    msgs = l1.query_gossip('query_short_channel_ids',
+                           '06226e46111a0b59caaf126043eb5bbf28c34f3a5e332a1fc7b2b73cf188910f',
+                           encoded)
 
+    assert len(msgs) == 6
     # 0x0100 = channel_announcement
-    l1.daemon.wait_for_log(r'\[IN\] 0100')
+    assert msgs[0].startswith('0100')
     # 0x0102 = channel_update
-    l1.daemon.wait_for_log(r'\[IN\] 0102')
-    l1.daemon.wait_for_log(r'\[IN\] 0102')
+    assert msgs[1].startswith('0102')
+    assert msgs[2].startswith('0102')
     # 0x0101 = node_announcement
-    l1.daemon.wait_for_log(r'\[IN\] 0101')
-    l1.daemon.wait_for_log(r'\[IN\] 0101')
+    assert msgs[3].startswith('0101')
+    assert msgs[4].startswith('0101')
+    assert msgs[5] == '010606226e46111a0b59caaf126043eb5bbf28c34f3a5e332a1fc7b2b73cf188910f01'
 
-    reply = l1.rpc.dev_query_scids(l2.info['id'], [scid12, scid23])
-    assert reply['complete']
+    encoded = subprocess.run(['devtools/mkencoded', '--scids', '00', scid12, scid23],
+                             check=True,
+                             timeout=TIMEOUT,
+                             stdout=subprocess.PIPE).stdout.strip().decode()
+    msgs = l1.query_gossip('query_short_channel_ids',
+                           '06226e46111a0b59caaf126043eb5bbf28c34f3a5e332a1fc7b2b73cf188910f',
+                           encoded)
+
     # Technically, this order could be different, but this matches code.
+    assert len(msgs) == 10
     # 0x0100 = channel_announcement
-    l1.daemon.wait_for_log(r'\[IN\] 0100')
+    assert msgs[0].startswith('0100')
     # 0x0102 = channel_update
-    l1.daemon.wait_for_log(r'\[IN\] 0102')
-    l1.daemon.wait_for_log(r'\[IN\] 0102')
+    assert msgs[1].startswith('0102')
+    assert msgs[2].startswith('0102')
     # 0x0100 = channel_announcement
-    l1.daemon.wait_for_log(r'\[IN\] 0100')
+    assert msgs[3].startswith('0100')
     # 0x0102 = channel_update
-    l1.daemon.wait_for_log(r'\[IN\] 0102')
-    l1.daemon.wait_for_log(r'\[IN\] 0102')
+    assert msgs[4].startswith('0102')
+    assert msgs[5].startswith('0102')
     # 0x0101 = node_announcement
-    l1.daemon.wait_for_log(r'\[IN\] 0101')
-    l1.daemon.wait_for_log(r'\[IN\] 0101')
+    assert msgs[6].startswith('0101')
+    assert msgs[7].startswith('0101')
+    assert msgs[8].startswith('0101')
+    assert msgs[9] == '010606226e46111a0b59caaf126043eb5bbf28c34f3a5e332a1fc7b2b73cf188910f01'
 
 
 def test_gossip_addresses(node_factory, bitcoind):
@@ -967,6 +1014,8 @@ def test_node_reannounce(node_factory, bitcoind):
 
     l1.stop()
     l1.daemon.opts['alias'] = 'SENIORBEAM'
+    # It won't update within 5 seconds, so sleep.
+    time.sleep(5)
     l1.start()
 
     # Wait for l1 to send us its own node_announcement.
@@ -983,6 +1032,9 @@ def test_node_reannounce(node_factory, bitcoind):
 
     # l1 should retransmit it exactly the same (no timestamp change!)
     l2.daemon.wait_for_log(r'{}.*\[IN\] {}'.format(l1.info['id'], nannouncement))
+
+    # Won't have queued up another one, either.
+    assert not l1.daemon.is_in_log('node_announcement: delaying')
 
 
 def test_gossipwith(node_factory):
@@ -1058,8 +1110,8 @@ def test_gossip_notices_close(node_factory, bitcoind):
 
 
 def test_getroute_exclude_duplicate(node_factory):
-    """Test that accidentally duplicating the same channel in
-    the exclude list will not have permanent effects.
+    """Test that accidentally duplicating the same channel or same node
+    in the exclude list will not have permanent effects.
     """
 
     l1, l2 = node_factory.line_graph(2, wait_for_announce=True)
@@ -1080,6 +1132,17 @@ def test_getroute_exclude_duplicate(node_factory):
     route2 = l1.rpc.getroute(l2.info['id'], 1, 1)['route']
     assert route == route2
 
+    # This should also fail to find a route as the only viable channel
+    # is excluded, and worse, is excluded twice.
+    with pytest.raises(RpcError):
+        l1.rpc.getroute(l2.info['id'], 1, 1, exclude=[l2.info['id'], l2.info['id']])
+
+    # This should still succeed since nothing is excluded anymore
+    # and in particular should return the exact same route as
+    # earlier.
+    route3 = l1.rpc.getroute(l2.info['id'], 1, 1)['route']
+    assert route == route3
+
 
 @unittest.skipIf(not DEVELOPER, "gossip propagation is slow without DEVELOPER=1")
 def test_getroute_exclude(node_factory, bitcoind):
@@ -1096,6 +1159,10 @@ def test_getroute_exclude(node_factory, bitcoind):
     # This should not
     with pytest.raises(RpcError):
         l1.rpc.getroute(l4.info['id'], 1, 1, exclude=[chan_l1l2])
+
+    # This should also not
+    with pytest.raises(RpcError):
+        l1.rpc.getroute(l4.info['id'], 1, 1, exclude=[l2.info['id']])
 
     # Blocking the wrong way should be fine.
     l1.rpc.getroute(l4.info['id'], 1, 1, exclude=[chan_l2l1])
@@ -1125,9 +1192,47 @@ def test_getroute_exclude(node_factory, bitcoind):
     # This works
     l1.rpc.getroute(l4.info['id'], 1, 1, exclude=[chan_l2l4])
 
+    # This works
+    l1.rpc.getroute(l4.info['id'], 1, 1, exclude=[l3.info['id']])
+
     # This doesn't
     with pytest.raises(RpcError):
         l1.rpc.getroute(l4.info['id'], 1, 1, exclude=[chan_l2l3, chan_l2l4])
+
+    # This doesn't
+    with pytest.raises(RpcError):
+        l1.rpc.getroute(l4.info['id'], 1, 1, exclude=[l3.info['id'], chan_l2l4])
+
+    l5 = node_factory.get_node()
+    l1.rpc.connect(l5.info['id'], 'localhost', l5.port)
+    scid15 = l1.fund_channel(l5, 1000000, wait_for_active=False)
+    l5.rpc.connect(l4.info['id'], 'localhost', l4.port)
+    scid54 = l5.fund_channel(l4, 1000000, wait_for_active=False)
+    bitcoind.generate_block(5)
+
+    # We don't wait above, because we care about it hitting l1.
+    l1.daemon.wait_for_logs([r'update for channel {}/0 now ACTIVE'
+                             .format(scid15),
+                             r'update for channel {}/1 now ACTIVE'
+                             .format(scid15),
+                             r'update for channel {}/0 now ACTIVE'
+                             .format(scid54),
+                             r'update for channel {}/1 now ACTIVE'
+                             .format(scid54)])
+
+    # This works now
+    l1.rpc.getroute(l4.info['id'], 1, 1, exclude=[l3.info['id'], chan_l2l4])
+
+    # This works now
+    l1.rpc.getroute(l4.info['id'], 1, 1, exclude=[l3.info['id'], l5.info['id']])
+
+    # This doesn't work
+    with pytest.raises(RpcError):
+        l1.rpc.getroute(l4.info['id'], 1, 1, exclude=[l3.info['id'], l5.info['id'], chan_l2l4])
+
+    # This doesn't work
+    with pytest.raises(RpcError):
+        l1.rpc.getroute(l4.info['id'], 1, 1, exclude=[chan_l2l3, l5.info['id'], chan_l2l4])
 
 
 @unittest.skipIf(not DEVELOPER, "need dev-compact-gossip-store")
@@ -1209,13 +1314,20 @@ def setup_gossip_store_test(node_factory, bitcoind):
     l2.rpc.setchannelfee(l1.info['id'], 20, 1000)
     wait_for(lambda: [c['base_fee_millisatoshi'] for c in l2.rpc.listchannels(scid12)['channels']] == [20, 20])
 
-    # Active records in store now looks like:
+    # Records in store now looks (something) like:
+    #    DELETED: local-add-channel (scid23)
+    #    DELETED: private channel_update (scid23/0)
+    #    DELETED: private channel_update (scid23/1)
     #  channel_announcement (scid23)
     #  channel_amount
+    #    DELETED: channel_update (scid23/0)
+    #    DELETED: channel_update (scid23/1)
     #  node_announcement
     #  node_announcement
     #  channel_update (scid23)
     #  local_add_channel (scid12)
+    #    DELETED: private channel_update (scid12/0)
+    #    DELETED: private channel_update (scid12/1)
     #  channel_update (scid23)
     #  private_channel_update (scid12)
     #  private_channel_update (scid12)
@@ -1236,6 +1348,7 @@ def test_gossip_store_compact_noappend(node_factory, bitcoind):
     assert not l2.daemon.is_in_log('gossip_store:.*truncate')
 
 
+@unittest.skipIf(not DEVELOPER, "updates are delayed without --dev-fast-gossip")
 def test_gossip_store_load_complex(node_factory, bitcoind):
     l2 = setup_gossip_store_test(node_factory, bitcoind)
 
@@ -1315,7 +1428,7 @@ def test_gossip_store_compact_on_load(node_factory, bitcoind):
 
     l2.restart()
 
-    wait_for(lambda: l2.daemon.is_in_log('gossip_store_compact_offline: 9 deleted, 9 copied'))
+    wait_for(lambda: l2.daemon.is_in_log(r'gossip_store_compact_offline: [5-8] deleted, 9 copied'))
     wait_for(lambda: l2.daemon.is_in_log(r'gossip_store: Read 1/4/2/0 cannounce/cupdate/nannounce/cdelete from store \(0 deleted\) in 1446 bytes'))
 
 
@@ -1393,3 +1506,52 @@ def test_gossip_no_backtalk(node_factory):
     # With DEVELOPER, this is long enough for gossip flush.
     time.sleep(2)
     assert not l3.daemon.is_in_log(r'\[OUT\] 0100')
+
+
+@unittest.skipIf(not DEVELOPER, "Needs --dev-gossip")
+@unittest.skipIf(TEST_NETWORK != 'regtest', "Channel announcement contains genesis hash, receiving node discards on mismatch")
+def test_gossip_ratelimit(node_factory):
+    # These make the channel exist, but we use our own gossip.
+    l1, l2 = node_factory.line_graph(2, wait_for_announce=True)
+
+    # Here are some ones I generated earlier (by removing gossip
+    # ratelimiting)
+    l3 = node_factory.get_node(options={'dev-gossip-time': 1568096251})
+    subprocess.run(['devtools/gossipwith',
+                    '--max-messages=0',
+                    '{}@localhost:{}'.format(l3.info['id'], l3.port),
+                    # announcement
+                    '0100987b271fc95a37dbed78e6159e0ab792cda64603780454ce80832b4e31f63a6760abc8fdc53be35bb7cfccd125ee3d15b4fbdfb42165098970c19c7822bb413f46390e0c043c777226927eacd2186a03f064e4bdc30f891cb6e4990af49967d34b338755e99d728987e3d49227815e17f3ab40092434a59e33548e870071176db7d44d8c8f4c4cac27ae6554eb9350e97d47617e3a1355296c78e8234446fa2f138ad1b03439f18520227fb9e9eb92689b3a0ed36e6764f5a41777e9a2a4ce1026d19a4e4d8f7715c13ac2d6bf3238608a1ccf9afd91f774d84d170d9edddebf7460c54d49bd6cd81410bc3eeeba2b7278b1b5f7e748d77d793f31086847d582000006226e46111a0b59caaf126043eb5bbf28c34f3a5e332a1fc7b2b73cf188910f0000670000010001022d223620a359a47ff7f7ac447c85c46c923da53389221a0054c11c1e3ca31d590266e4598d1d3c415f572a8488830b60f7e744ed9235eb0b1ba93283b315c0351802e3bd38009866c9da8ec4aa99cc4ea9c6c0dd46df15c61ef0ce1f271291714e5702324266de8403b3ab157a09f1f784d587af61831c998c151bcc21bb74c2b2314b',
+                    # first update is free
+                    '010225bfd9c5e2c5660188a14deb4002cd645ee67f00ad3b82146e46711ec460cb0c6819fdd1c680cb6d24e3906679ef071f13243a04a123e4b83310ebf0518ffd4206226e46111a0b59caaf126043eb5bbf28c34f3a5e332a1fc7b2b73cf188910f00006700000100015d773ffb010100060000000000000000000000010000000a000000003b023380'],
+                   check=True, timeout=TIMEOUT)
+
+    # Wait for it to process channel.
+    wait_for(lambda: [c['fee_per_millionth'] for c in l3.rpc.listchannels()['channels']] == [10])
+
+    subprocess.run(['devtools/gossipwith',
+                    '--max-messages=0',
+                    '{}@localhost:{}'.format(l3.info['id'], l3.port),
+                    # next 4 are let through...
+                    '01023a892ad9c9953a54ad3b8e2e03a93d1c973241b62f9a5cd1f17d5cdf08de0e8b4fcd24aa8bd45a48b788fe9dab3d416f28dfa390bc900ec0176ec5bd1afd435706226e46111a0b59caaf126043eb5bbf28c34f3a5e332a1fc7b2b73cf188910f00006700000100015d77400001010006000000000000000000000014000003e9000000003b023380',
+                    '010245966763623ebc16796165263d4b21711ef04ebf3929491e695ff89ed2b8ccc0668ceb9e35e0ff5b8901d95732a119c1ed84ac99861daa2de462118f7b70049f06226e46111a0b59caaf126043eb5bbf28c34f3a5e332a1fc7b2b73cf188910f00006700000100015d77400101010006000000000000000000000014000003ea000000003b023380',
+                    '0102c479b7684b9db496b844f6925f4ffd8a27c5840a020d1b537623c1545dcd8e195776381bbf51213e541a853a4a49a0faf84316e7ccca5e7074901a96bbabe04e06226e46111a0b59caaf126043eb5bbf28c34f3a5e332a1fc7b2b73cf188910f00006700000100015d77400201010006000000000000000000000014000003eb000000003b023380',
+                    # timestamp=1568096259, fee_proportional_millionths=1004
+                    '01024b866012d995d3d7aec7b7218a283de2d03492dbfa21e71dd546ec2e36c3d4200453420aa02f476f99c73fe1e223ea192f5fa544b70a8319f2a216f1513d503d06226e46111a0b59caaf126043eb5bbf28c34f3a5e332a1fc7b2b73cf188910f00006700000100015d77400301010006000000000000000000000014000003ec000000003b023380',
+                    # update 5 marks you as a nasty spammer!
+                    '01025b5b5a0daed874ab02bd3356d38190ff46bbaf5f10db5067da70f3ca203480ca78059e6621c6143f3da4e454d0adda6d01a9980ed48e71ccd0c613af73570a7106226e46111a0b59caaf126043eb5bbf28c34f3a5e332a1fc7b2b73cf188910f00006700000100015d77400401010006000000000000000000000014000003ed000000003b023380'],
+                   check=True, timeout=TIMEOUT)
+
+    wait_for(lambda: [c['fee_per_millionth'] for c in l3.rpc.listchannels()['channels']] == [1004])
+
+    # 24 seconds later, it will accept another.
+    l3.rpc.call('dev-gossip-set-time', [1568096251 + 24])
+
+    subprocess.run(['devtools/gossipwith',
+                    '--max-messages=0',
+                    '{}@localhost:{}'.format(l3.info['id'], l3.port),
+                    # update 6: timestamp=1568096284 fee_proportional_millionths=1006
+                    '010282d24bcd984956bd9b891848404ee59d89643923b21641d2c2c0770a51b8f5da00cef82458add970f0b654aa4c8d54f68a9a1cc6470a35810303b09437f1f73d06226e46111a0b59caaf126043eb5bbf28c34f3a5e332a1fc7b2b73cf188910f00006700000100015d77401c01010006000000000000000000000014000003ee000000003b023380'],
+                   check=True, timeout=TIMEOUT)
+
+    wait_for(lambda: [c['fee_per_millionth'] for c in l3.rpc.listchannels()['channels']] == [1006])

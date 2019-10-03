@@ -5,11 +5,12 @@
 #include <ccan/tal/str/str.h>
 #include <common/amount.h>
 #include <common/bolt11.h>
+#include <common/gossip_constants.h>
 #include <common/pseudorand.h>
 #include <common/type_to_string.h>
-#include <gossipd/gossip_constants.h>
 #include <plugins/libplugin.h>
 #include <stdio.h>
+#include <wire/onion_defs.h>
 
 /* Public key of this node. */
 static struct node_id my_id;
@@ -177,6 +178,14 @@ static void attempt_failed_tok(struct pay_command *pc, const char *method,
 	failed_end(failed);
 }
 
+/* Helper to add a u32. */
+static void json_out_add_u32(struct json_out *jout,
+			     const char *fieldname,
+			     u32 val)
+{
+	json_out_add(jout, fieldname, false, "%"PRIu32, val);
+}
+
 /* Helper to add a u64. */
 static void json_out_add_u64(struct json_out *jout,
 			     const char *fieldname,
@@ -190,19 +199,30 @@ static struct command_result *start_pay_attempt(struct command *cmd,
 						const char *fmt, ...);
 
 /* Is this (erring) channel within the routehint itself? */
-static bool channel_in_routehint(const struct route_info *routehint,
-				 const char *scidstr, size_t scidlen)
+static bool node_or_channel_in_routehint(const struct route_info *routehint,
+					 const char *idstr, size_t idlen)
 {
+	struct node_id nodeid;
 	struct short_channel_id scid;
+	bool node_err = true;
 
-	if (!short_channel_id_from_str(scidstr, scidlen, &scid))
-		plugin_err("bad erring_channel '%.*s'",
-			   (int)scidlen, scidstr);
+	if (!node_id_from_hexstr(idstr, idlen, &nodeid)) {
+		if (!short_channel_id_from_str(idstr, idlen, &scid))
+			plugin_err("bad erring_node or erring_channel '%.*s'",
+				   (int)idlen, idstr);
+		else
+			node_err = false;
+	}
 
-	for (size_t i = 0; i < tal_count(routehint); i++)
-		if (short_channel_id_eq(&scid, &routehint[i].short_channel_id))
-			return true;
-
+	for (size_t i = 0; i < tal_count(routehint); i++) {
+		if (node_err) {
+			if (node_id_eq(&nodeid, &routehint[i].pubkey))
+				return true;
+		} else {
+			if (short_channel_id_eq(&scid, &routehint[i].short_channel_id))
+				return true;
+		}
+	}
 	return false;
 }
 
@@ -251,8 +271,9 @@ static bool routehint_excluded(const struct route_info *routehint,
 	 * found that one direction of a channel is unavailable, but they
 	 * are suggesting we use it the other way.  Very unlikely though! */
 	for (size_t i = 0; i < tal_count(excludes); i++)
-		if (channel_in_routehint(routehint,
-					 excludes[i], strlen(excludes[i])))
+		if (node_or_channel_in_routehint(routehint,
+						 excludes[i],
+						 strlen(excludes[i])))
 			return true;
 	return false;
 }
@@ -293,8 +314,9 @@ static struct command_result *waitsendpay_error(struct command *cmd,
 						const jsmntok_t *error,
 						struct pay_command *pc)
 {
-	const jsmntok_t *codetok, *scidtok, *dirtok;
-	int code;
+	const jsmntok_t *codetok, *failcodetok, *nodeidtok, *scidtok, *dirtok;
+	int code, failcode;
+	bool node_err = false;
 
 	attempt_failed_tok(pc, "waitsendpay", buf, error);
 
@@ -310,33 +332,62 @@ static struct command_result *waitsendpay_error(struct command *cmd,
 		return forward_error(cmd, buf, error, pc);
 	}
 
-	scidtok = json_delve(buf, error, ".data.erring_channel");
-	if (!scidtok)
-		plugin_err("waitsendpay error no erring_channel '%.*s'",
+	failcodetok = json_delve(buf, error, ".data.failcode");
+	if (!json_to_int(buf, failcodetok, &failcode))
+		plugin_err("waitsendpay error gave no 'failcode'? '%.*s'",
 			   error->end - error->start, buf + error->start);
-	dirtok = json_delve(buf, error, ".data.erring_direction");
-	if (!dirtok)
-		plugin_err("waitsendpay error no erring_direction '%.*s'",
-			   error->end - error->start, buf + error->start);
+
+	if (failcode & NODE) {
+		nodeidtok = json_delve(buf, error, ".data.erring_node");
+		if (!nodeidtok)
+			plugin_err("waitsendpay error no erring_node '%.*s'",
+				   error->end - error->start, buf + error->start);
+		node_err = true;
+	} else {
+		scidtok = json_delve(buf, error, ".data.erring_channel");
+		if (!scidtok)
+			plugin_err("waitsendpay error no erring_channel '%.*s'",
+				   error->end - error->start, buf + error->start);
+		dirtok = json_delve(buf, error, ".data.erring_direction");
+		if (!dirtok)
+			plugin_err("waitsendpay error no erring_direction '%.*s'",
+				   error->end - error->start, buf + error->start);
+	}
 
 	if (time_after(time_now(), pc->stoptime)) {
 		return waitsendpay_expired(cmd, pc);
 	}
 
-	/* If failure is in routehint part, try next one */
-	if (channel_in_routehint(pc->current_routehint,
-				 buf + scidtok->start,
-				 scidtok->end - scidtok->start))
-		return next_routehint(cmd, pc);
+	if (node_err) {
+		/* If failure is in routehint part, try next one */
+		if (node_or_channel_in_routehint(pc->current_routehint,
+						 buf + nodeidtok->start,
+						 nodeidtok->end - nodeidtok->start))
+			return next_routehint(cmd, pc);
 
-	/* Otherwise, add erring channel to exclusion list. */
-	tal_arr_expand(&pc->excludes,
-		       tal_fmt(pc->excludes, "%.*s/%c",
+		/* Otherwise, add erring channel to exclusion list. */
+		tal_arr_expand(&pc->excludes,
+			       tal_fmt(pc->excludes, "%.*s",
+			       nodeidtok->end - nodeidtok->start,
+			       buf + nodeidtok->start));
+	} else {
+		/* If failure is in routehint part, try next one */
+		if (node_or_channel_in_routehint(pc->current_routehint,
+						 buf + scidtok->start,
+						 scidtok->end - scidtok->start))
+			return next_routehint(cmd, pc);
+
+		/* Otherwise, add erring channel to exclusion list. */
+		tal_arr_expand(&pc->excludes,
+			       tal_fmt(pc->excludes, "%.*s/%c",
 			       scidtok->end - scidtok->start,
 			       buf + scidtok->start,
 			       buf[dirtok->start]));
+	}
+
 	/* Try again. */
-	return start_pay_attempt(cmd, pc, "Excluded channel %s",
+	return start_pay_attempt(cmd, pc, "Excluded %s %s",
+				 node_err ? "node" : "channel",
 				 pc->excludes[tal_count(pc->excludes)-1]);
 }
 
@@ -451,22 +502,31 @@ static struct command_result *sendpay_error(struct command *cmd,
 
 static const jsmntok_t *find_worst_channel(const char *buf,
 					   const jsmntok_t *route,
-					   const char *fieldname,
-					   u64 final)
+					   const char *fieldname)
 {
-	u64 prev = final, worstval = 0;
-	const jsmntok_t *worst = NULL, *t;
+	u64 prev, worstval = 0;
+	const jsmntok_t *worst = NULL, *t, *t_prev = NULL;
 	size_t i;
 
 	json_for_each_arr(i, t, route) {
 		u64 val;
 
 		json_to_u64(buf, json_get_member(buf, t, fieldname), &val);
-		if (worst == NULL || val - prev > worstval) {
-			worst = t;
-			worstval = val - prev;
+
+		/* For the first hop, now we can't know if it's the worst.
+		 * Just store the info and continue. */
+		if (!i) {
+			prev = val;
+			t_prev = t;
+			continue;
+		}
+
+		if (worst == NULL || prev - val > worstval) {
+			worst = t_prev;
+			worstval = prev - val;
 		}
 		prev = val;
+		t_prev = t;
 	}
 
 	return worst;
@@ -480,8 +540,9 @@ static bool maybe_exclude(struct pay_command *pc,
 
 	scid = json_get_member(buf, route, "channel");
 
-	if (channel_in_routehint(pc->current_routehint,
-				 buf + scid->start, scid->end - scid->start))
+	if (node_or_channel_in_routehint(pc->current_routehint,
+					 buf + scid->start,
+					 scid->end - scid->start))
 		return false;
 
 	dir = json_get_member(buf, route, "direction");
@@ -562,7 +623,7 @@ static struct command_result *getroute_done(struct command *cmd,
 
 		/* Try excluding most fee-charging channel (unless it's in
 		 * routeboost). */
-		charger = find_worst_channel(buf, t, "msatoshi", pc->msat.millisatoshis); /* Raw: shared function needs u64 */
+		charger = find_worst_channel(buf, t, "msatoshi");
 		if (maybe_exclude(pc, buf, charger)) {
 			return start_pay_attempt(cmd, pc,
 						 "Excluded expensive channel %s",
@@ -589,7 +650,7 @@ static struct command_result *getroute_done(struct command *cmd,
 		else
 			tal_free(failed);
 
-		delayer = find_worst_channel(buf, t, "delay", pc->final_cltv);
+		delayer = find_worst_channel(buf, t, "delay");
 
 		/* Try excluding most delaying channel (unless it's in
 		 * routeboost). */
@@ -655,7 +716,7 @@ static struct command_result *start_pay_attempt(struct command *cmd,
 {
 	struct amount_msat msat;
 	const char *dest;
-	size_t max_hops = ROUTING_MAX_HOPS;
+	u32 max_hops = ROUTING_MAX_HOPS;
 	u32 cltv;
 	struct pay_attempt *attempt;
 	va_list ap;
@@ -714,8 +775,8 @@ static struct command_result *start_pay_attempt(struct command *cmd,
 	json_out_addstr(params, "id", dest);
 	json_out_addstr(params, "msatoshi",
 			type_to_string(tmpctx, struct amount_msat, &msat));
-	json_out_add_u64(params, "cltv", cltv);
-	json_out_add_u64(params, "maxhops", max_hops);
+	json_out_add_u32(params, "cltv", cltv);
+	json_out_add_u32(params, "maxhops", max_hops);
 	json_out_add(params, "riskfactor", false, "%f", pc->riskfactor);
 	if (tal_count(pc->excludes) != 0) {
 		json_out_start(params, "exclude", '[');
@@ -974,7 +1035,7 @@ static struct command_result *json_pay(struct command *cmd,
 			     maxdelay_default),
 		   p_opt_def("exemptfee", param_msat, &exemptfee, AMOUNT_MSAT(5000)),
 		   NULL))
-		return NULL;
+		return command_param_failed();
 
 	b11 = bolt11_decode(cmd, b11str, NULL, &fail);
 	if (!b11) {
@@ -1076,7 +1137,7 @@ static void add_attempt(struct json_out *ret,
 		json_out_end(ret, ']');
 	}
 	if (tal_count(attempt->excludes)) {
-		json_out_start(ret, "excluded_channels", '[');
+		json_out_start(ret, "excluded_nodes_or_channels", '[');
 		for (size_t i = 0; i < tal_count(attempt->excludes); i++)
 			json_out_addstr(ret, NULL, attempt->excludes[i]);
 		json_out_end(ret, ']');
@@ -1105,7 +1166,7 @@ static struct command_result *json_paystatus(struct command *cmd,
 	if (!param(cmd, buf, params,
 		   p_opt("bolt11", param_string, &b11str),
 		   NULL))
-		return NULL;
+		return command_param_failed();
 
 	ret = json_out_new(NULL);
 	json_out_start(ret, NULL, '{');
@@ -1227,7 +1288,7 @@ static struct command_result *json_listpays(struct command *cmd,
 	if (!param(cmd, buf, params,
 		   p_opt("bolt11", param_string, &b11str),
 		   NULL))
-		return NULL;
+		return command_param_failed();
 
 	return send_outreq(cmd, "listsendpays",
 			   listsendpays_done, forward_error,

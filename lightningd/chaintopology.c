@@ -654,13 +654,16 @@ static void topo_add_utxos(struct chain_topology *topo, struct block *b)
 	for (size_t i = 0; i < tal_count(b->full_txs); i++) {
 		const struct bitcoin_tx *tx = b->full_txs[i];
 		for (size_t j = 0; j < tx->wtx->num_outputs; j++) {
-			const u8 *script = bitcoin_tx_output_get_script(tmpctx, tx, j);
-			struct amount_sat amt = bitcoin_tx_output_get_amount(tx, j);
+			if (tx->wtx->outputs[j].features & WALLY_TX_IS_COINBASE)
+				continue;
 
-			if (is_p2wsh(script, NULL)) {
+			const u8 *script = bitcoin_tx_output_get_script(tmpctx, tx, j);
+			struct amount_asset amt = bitcoin_tx_output_get_amount(tx, j);
+
+			if (amount_asset_is_main(&amt) && is_p2wsh(script, NULL)) {
 				wallet_utxoset_add(topo->ld->wallet, tx, j,
 						   b->height, i, script,
-						   amt);
+						   amount_asset_to_sat(&amt));
 			}
 		}
 	}
@@ -691,7 +694,11 @@ static struct block *new_block(struct chain_topology *topo,
 {
 	struct block *b = tal(topo, struct block);
 
+<<<<<<< HEAD
 	sha256_header(&b->blkid.shad, &blk->hdr);
+=======
+	bitcoin_block_blkid(blk, &b->blkid);
+>>>>>>> upstream/master
 	log_debug(topo->log, "Adding block %u: %s",
 		  height,
 		  type_to_string(tmpctx, struct bitcoin_blkid, &b->blkid));
@@ -944,6 +951,8 @@ struct chain_topology *new_topology(struct lightningd *ld, struct log *log)
 	topo->poll_seconds = 30;
 	topo->feerate_uninitialized = true;
 	topo->root = NULL;
+	topo->sync_waiters = tal(topo, struct list_head);
+	list_head_init(topo->sync_waiters);
 	return topo;
 }
 
@@ -953,8 +962,6 @@ void setup_topology(struct chain_topology *topo,
 {
 	memset(&topo->feerate, 0, sizeof(topo->feerate));
 	topo->timers = timers;
-	topo->sync_waiters = tal(topo, struct list_head);
-	list_head_init(topo->sync_waiters);
 
 	topo->min_blockheight = min_blockheight;
 	topo->max_blockheight = max_blockheight;

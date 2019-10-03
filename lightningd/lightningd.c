@@ -76,6 +76,7 @@
 #include <lightningd/options.h>
 #include <onchaind/onchain_wire.h>
 #include <signal.h>
+#include <sys/resource.h>
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <unistd.h>
@@ -118,6 +119,8 @@ static struct lightningd *new_lightningd(const tal_t *ctx)
 	ld->dev_subdaemon_fail = false;
 	ld->dev_allow_localhost = false;
 	ld->dev_gossip_time = 0;
+	ld->dev_fast_gossip = false;
+	ld->dev_fast_gossip_prune = false;
 	ld->dev_force_privkey = NULL;
 	ld->dev_force_bip32_seed = NULL;
 	ld->dev_force_channel_secrets = NULL;
@@ -585,6 +588,7 @@ void notify_new_block(struct lightningd *ld, u32 block_height)
 	/* Inform our subcomponents individually. */
 	htlcs_notify_new_block(ld, block_height);
 	channel_notify_new_block(ld, block_height);
+	gossip_notify_new_block(ld, block_height);
 }
 
 static void on_sigint(int _ UNUSED)
@@ -628,6 +632,11 @@ int main(int argc, char *argv[])
 	struct timers *timers;
 	const char *stop_response;
 	struct htlc_in_map *unprocessed_htlcs;
+	struct rlimit nofile = {1024, 1024};
+
+	/*~ Make sure that we limit ourselves to something reasonable. Modesty
+	 *  is a virtue. */
+	setrlimit(RLIMIT_NOFILE, &nofile);
 
 	/*~ What happens in strange locales should stay there. */
 	setup_locale();

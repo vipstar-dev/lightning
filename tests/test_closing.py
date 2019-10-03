@@ -12,9 +12,10 @@ import unittest
 
 
 @unittest.skipIf(not DEVELOPER, "Too slow without --dev-bitcoind-poll")
-def test_closing(node_factory, bitcoind):
+def test_closing(node_factory, bitcoind, chainparams):
     l1, l2 = node_factory.line_graph(2)
     chan = l1.get_channel_scid(l2)
+    fee = 5430 if not chainparams['elements'] else 8955
 
     l1.pay(l2, 200000000)
 
@@ -29,7 +30,7 @@ def test_closing(node_factory, bitcoind):
 
     # Only wait for the channels to activate with DEVELOPER=1,
     # otherwise it's going to take too long because of the missing
-    # --dev-broadcast-interval
+    # --dev-fast-gossip
     if DEVELOPER:
         wait_for(lambda: len(l1.getactivechannels()) == 2)
         wait_for(lambda: len(l2.getactivechannels()) == 2)
@@ -61,7 +62,7 @@ def test_closing(node_factory, bitcoind):
 
     billboard = only_one(l1.rpc.listpeers(l2.info['id'])['peers'][0]['channels'])['status']
     assert billboard == [
-        'CLOSINGD_SIGEXCHANGE:We agreed on a closing fee of 5430 satoshi for tx:{}'.format(closetxid),
+        'CLOSINGD_SIGEXCHANGE:We agreed on a closing fee of {} satoshi for tx:{}'.format(fee, closetxid),
     ]
     bitcoind.generate_block(1)
 
@@ -73,14 +74,14 @@ def test_closing(node_factory, bitcoind):
     assert closetxid in set([o['txid'] for o in l2.rpc.listfunds()['outputs']])
 
     wait_for(lambda: only_one(l1.rpc.listpeers(l2.info['id'])['peers'][0]['channels'])['status'] == [
-        'CLOSINGD_SIGEXCHANGE:We agreed on a closing fee of 5430 satoshi for tx:{}'.format(closetxid),
+        'CLOSINGD_SIGEXCHANGE:We agreed on a closing fee of {} satoshi for tx:{}'.format(fee, closetxid),
         'ONCHAIN:Tracking mutual close transaction',
         'ONCHAIN:All outputs resolved: waiting 99 more blocks before forgetting channel'
     ])
 
     bitcoind.generate_block(9)
     wait_for(lambda: only_one(l1.rpc.listpeers(l2.info['id'])['peers'][0]['channels'])['status'] == [
-        'CLOSINGD_SIGEXCHANGE:We agreed on a closing fee of 5430 satoshi for tx:{}'.format(closetxid),
+        'CLOSINGD_SIGEXCHANGE:We agreed on a closing fee of {} satoshi for tx:{}'.format(fee, closetxid),
         'ONCHAIN:Tracking mutual close transaction',
         'ONCHAIN:All outputs resolved: waiting 90 more blocks before forgetting channel'
     ])
@@ -297,7 +298,7 @@ def test_closing_negotiation_reconnect(node_factory, bitcoind):
 
 
 @unittest.skipIf(not DEVELOPER, "needs DEVELOPER=1")
-def test_penalty_inhtlc(node_factory, bitcoind, executor):
+def test_penalty_inhtlc(node_factory, bitcoind, executor, chainparams):
     """Test penalty transaction with an incoming HTLC"""
     # We suppress each one after first commit; HTLC gets added not fulfilled.
     # Feerates identical so we don't get gratuitous commit to update them
@@ -364,12 +365,13 @@ def test_penalty_inhtlc(node_factory, bitcoind, executor):
     outputs = l2.rpc.listfunds()['outputs']
     assert [o['status'] for o in outputs] == ['confirmed'] * 2
     # Allow some lossage for fees.
+    slack = 27000 if chainparams['elements'] else 15000
     assert sum(o['value'] for o in outputs) < 10**6
-    assert sum(o['value'] for o in outputs) > 10**6 - 15000
+    assert sum(o['value'] for o in outputs) > 10**6 - slack
 
 
 @unittest.skipIf(not DEVELOPER, "needs DEVELOPER=1")
-def test_penalty_outhtlc(node_factory, bitcoind, executor):
+def test_penalty_outhtlc(node_factory, bitcoind, executor, chainparams):
     """Test penalty transaction with an outgoing HTLC"""
     # First we need to get funds to l2, so suppress after second.
     # Feerates identical so we don't get gratuitous commit to update them
@@ -443,8 +445,9 @@ def test_penalty_outhtlc(node_factory, bitcoind, executor):
     outputs = l2.rpc.listfunds()['outputs']
     assert [o['status'] for o in outputs] == ['confirmed'] * 3
     # Allow some lossage for fees.
+    slack = 27000 if chainparams['elements'] else 15000
     assert sum(o['value'] for o in outputs) < 10**6
-    assert sum(o['value'] for o in outputs) > 10**6 - 15000
+    assert sum(o['value'] for o in outputs) > 10**6 - slack
 
 
 @unittest.skipIf(not DEVELOPER, "needs DEVELOPER=1")
@@ -1495,7 +1498,7 @@ def test_permfail(node_factory, bitcoind):
         addr = txout['scriptPubKey']['addresses'][0]
         assert(addr == o['address'])
 
-    addr = l1.bitcoin.rpc.getnewaddress()
+    addr = l1.bitcoin.getnewaddress()
     l1.rpc.withdraw(addr, "all")
 
 
@@ -1550,7 +1553,7 @@ def test_option_upfront_shutdown_script(node_factory, bitcoind):
     wait_for(lambda: [c['state'] for c in only_one(l2.rpc.listpeers()['peers'])['channels']] == ['ONCHAIN', 'ONCHAIN'])
 
     # Figure out what address it will try to use.
-    keyidx = int(l1.db_query("SELECT val FROM vars WHERE name='bip32_max_index';")[0]['val'])
+    keyidx = int(l1.db_query("SELECT intval FROM vars WHERE name='bip32_max_index';")[0]['intval'])
 
     # Expect 1 for change address, 1 for the channel final address,
     # which are discarded as the 'scratch' tx that the fundchannel

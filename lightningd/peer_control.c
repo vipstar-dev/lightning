@@ -937,12 +937,6 @@ void peer_connected(struct lightningd *ld, const u8 *msg,
 		fatal("Connectd gave bad CONNECT_PEER_CONNECTED message %s",
 		      tal_hex(msg, msg));
 
-#if DEVELOPER
-	/* Override broaedcast interval from our config */
-	hook_payload->pps->dev_gossip_broadcast_msec
-		= ld->config.broadcast_interval_msec;
-#endif
-
 	per_peer_state_set_fds(hook_payload->pps,
 			       peer_fd, gossip_fd, gossip_store_fd);
 
@@ -973,13 +967,16 @@ static bool check_funding_tx(const struct bitcoin_tx *tx,
 			     const struct channel *channel)
 {
 	u8 *wscript;
+	struct amount_asset asset =
+	    bitcoin_tx_output_get_amount(tx, channel->funding_outnum);
+
+	if (!amount_asset_is_main(&asset))
+		return false;
 
 	if (channel->funding_outnum >= tx->wtx->num_outputs)
 		return false;
 
-	if (!amount_sat_eq(bitcoin_tx_output_get_amount(tx,
-							channel->funding_outnum),
-			   channel->funding))
+	if (!amount_sat_eq(amount_asset_to_sat(&asset), channel->funding))
 		return false;
 
 	wscript = bitcoin_redeem_2of2(tmpctx,

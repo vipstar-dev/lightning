@@ -48,12 +48,6 @@ struct config {
 	/* How long between changing commit and sending COMMIT message. */
 	u32 commit_time_ms;
 
-	/* How often to broadcast gossip (msec) */
-	u32 broadcast_interval_msec;
-
-	/* Channel update interval */
-	u32 channel_update_interval;
-
 	/* Do we let the funder set any fee rate they want */
 	bool ignore_fee_limits;
 
@@ -73,6 +67,10 @@ struct config {
 
 	/* Minimal amount of effective funding_satoshis for accepting channels */
 	u64 min_capacity_sat;
+
+	/* Allow to define the default behavior of tot services calls*/
+	bool use_v3_autotor;
+
 };
 
 struct lightningd {
@@ -207,6 +205,10 @@ struct lightningd {
 	/* Timestamp to use for gossipd, iff non-zero */
 	u32 dev_gossip_time;
 
+	/* Speedup gossip propagation, for testing. */
+	bool dev_fast_gossip;
+	bool dev_fast_gossip_prune;
+
 	/* Things we've marked as not leaking. */
 	const void **notleaks;
 
@@ -231,6 +233,8 @@ struct lightningd {
 	const char *original_directory;
 
 	struct plugins *plugins;
+
+	char *wallet_dsn;
 };
 
 /* Turning this on allows a tal allocation to return NULL, rather than aborting.

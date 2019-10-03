@@ -15,8 +15,8 @@
 #include <ccan/crc32c/crc32c.h>
 #include <ccan/err/err.h>
 #include <ccan/str/hex/hex.h>
+#include <common/gossip_constants.h>
 #include <common/utils.h>
-#include <gossipd/gossip_constants.h>
 #include <inttypes.h>
 #include <wire/gen_peer_wire.h>
 #include <stdio.h>
@@ -79,7 +79,7 @@ static char *sig_as_hex(const secp256k1_ecdsa_signature *sig)
 	return tal_hexstr(NULL, compact_sig, sizeof(compact_sig));
 }
 
-/* BOLT-61a1365a45cc8b463ddbbe3429d350f8eac787dd #7:
+/* BOLT #7:
  *
  * The checksum of a `channel_update` is the CRC32C checksum as specified in
  * [RFC3720](https://tools.ietf.org/html/rfc3720#appendix-B.4) of this

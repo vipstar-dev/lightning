@@ -15,7 +15,7 @@ COMMON_SRC_NOGEN :=				\
 	common/cryptomsg.c			\
 	common/daemon.c				\
 	common/daemon_conn.c			\
-	common/decode_short_channel_ids.c	\
+	common/decode_array.c			\
 	common/derive_basepoints.c		\
 	common/dev_disconnect.c			\
 	common/features.c			\
@@ -64,7 +64,7 @@ COMMON_SRC_NOGEN :=				\
 
 COMMON_SRC_GEN := common/gen_status_wire.c common/gen_peer_status_wire.c
 
-COMMON_HEADERS_NOGEN := $(COMMON_SRC_NOGEN:.c=.h) common/overflows.h common/htlc.h common/status_levels.h common/json_command.h common/jsonrpc_errors.h
+COMMON_HEADERS_NOGEN := $(COMMON_SRC_NOGEN:.c=.h) common/overflows.h common/htlc.h common/status_levels.h common/json_command.h common/jsonrpc_errors.h common/gossip_constants.h
 COMMON_HEADERS_GEN := common/gen_htlc_state_names.h common/gen_status_wire.h common/gen_peer_status_wire.h
 
 COMMON_HEADERS := $(COMMON_HEADERS_GEN) $(COMMON_HEADERS_NOGEN)

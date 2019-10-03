@@ -1410,7 +1410,6 @@ int main(int argc, char *argv[])
 	u8 *msg, *inner;
 	struct pollfd pollfd[3];
 	struct state *state = tal(NULL, struct state);
-	struct bitcoin_blkid chain_hash;
 	struct secret *none;
 
 	subdaemon_setup(argc, argv);
@@ -1422,7 +1421,7 @@ int main(int argc, char *argv[])
 	/*~ The very first thing we read from lightningd is our init msg */
 	msg = wire_sync_read(tmpctx, REQ_FD);
 	if (!fromwire_opening_init(state, msg,
-				   &chain_hash,
+				   &chainparams,
 				   &state->localconf,
 				   &state->max_to_self_delay,
 				   &state->min_effective_htlc_capacity,
@@ -1433,7 +1432,8 @@ int main(int argc, char *argv[])
 				   &state->min_feerate, &state->max_feerate,
 				   &state->localfeatures,
 				   &state->option_static_remotekey,
-				   &inner))
+				   &inner,
+				   &dev_fast_gossip))
 		master_badmsg(WIRE_OPENING_INIT, msg);
 
 	/* 3 == peer, 4 == gossipd, 5 = gossip_store, 6 = hsmd */
@@ -1450,7 +1450,8 @@ int main(int argc, char *argv[])
 	/*~ Even though I only care about bitcoin, there's still testnet and
 	 * regtest modes, so we have a general "parameters for this chain"
 	 * function. */
-	state->chainparams = chainparams_by_chainhash(&chain_hash);
+	state->chainparams = chainparams;
+
 	/*~ Initially we're not associated with a channel, but
 	 * handle_peer_gossip_or_error compares this. */
 	memset(&state->channel_id, 0, sizeof(state->channel_id));
@@ -1496,6 +1497,12 @@ int main(int argc, char *argv[])
 			t = time_to_msec(trel);
 		else
 			t = -1;
+
+		/*~ If we get a signal which aborts the poll() call, valgrind
+		 * complains about revents being uninitialized.  I'm not sure
+		 * that's correct, but it's easy to be sure. */
+		pollfd[0].revents = pollfd[1].revents = pollfd[2].revents = 0;
+
 		poll(pollfd, ARRAY_SIZE(pollfd), t);
 		/* Subtle: handle_master_in can do its own poll loop, so
 		 * don't try to service more than one fd per loop. */

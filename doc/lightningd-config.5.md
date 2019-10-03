@@ -128,6 +128,11 @@ is a relative path, it is relative to the starting directory, not
 readable (we allow missing files in the default case). Using this inside
 a configuration file is meaningless.
 
+ **wallet**=*DSN*
+Identify the location of the wallet. This is a fully qualified data source
+name, including a scheme such as `sqlite3` or `postgres` followed by the
+connection parameters.
+
 ### Lightning node customization options
 
  **alias**=*RRGGBB*
@@ -307,6 +312,9 @@ all DNS lookups, to avoid leaking information.
 
  **disable-dns**
 Disable the DNS bootstrapping mechanism to find a node by its node ID.
+
+ **enable-autotor-v2-mode**
+Try to get a v2 onion address from the Tor service call, default is v3.
 
  **tor-service-password**=*PASSWORD*
 Set a Tor control password, which may be needed for *autotor:* to

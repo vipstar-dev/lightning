@@ -94,11 +94,10 @@ def test_plugin_dir(node_factory):
 
 
 def test_plugin_slowinit(node_factory):
-    """Tests the 'plugin' RPC command when init is slow"""
+    """Tests that the 'plugin' RPC command times out if plugin doesnt respond"""
     n = node_factory.get_node()
 
     n.rpc.plugin_start(os.path.join(os.getcwd(), "tests/plugins/slow_init.py"))
-    n.daemon.wait_for_log("slow_init.py initializing.* 'startup': False")
 
     # It's not actually configured yet, see what happens;
     # make sure 'rescan' and 'list' controls dont crash
@@ -116,42 +115,47 @@ def test_plugin_command(node_factory):
     assert(len(cmd) == 0)
 
     # Add the 'contrib/plugins' test dir
-    time.sleep(2)
     n.rpc.plugin_startdir(directory=os.path.join(os.getcwd(), "contrib/plugins"))
-    n.daemon.wait_for_log(r"Plugin helloworld.py initialized")
     # Make sure that the 'hello' command from the helloworld.py plugin
     # is now available.
     cmd = [hlp for hlp in n.rpc.help()["help"] if "hello" in hlp["command"]]
     assert(len(cmd) == 1)
 
-    # Make sure 'rescan' and 'list' controls dont crash
+    # Make sure 'rescan' and 'list' subcommands dont crash
     n.rpc.plugin_rescan()
     n.rpc.plugin_list()
-    time.sleep(1)
 
     # Make sure the plugin behaves normally after stop and restart
-    n.rpc.plugin_stop(plugin="helloworld.py")
+    assert("Successfully stopped helloworld.py." == n.rpc.plugin_stop(plugin="helloworld.py")[''])
     n.daemon.wait_for_log(r"Killing plugin: helloworld.py")
-    time.sleep(1)
     n.rpc.plugin_start(plugin=os.path.join(os.getcwd(), "contrib/plugins/helloworld.py"))
     n.daemon.wait_for_log(r"Plugin helloworld.py initialized")
     assert("Hello world" == n.rpc.call(method="hello"))
 
     # Now stop the helloworld plugin
-    n.rpc.plugin_stop(plugin="helloworld.py")
+    assert("Successfully stopped helloworld.py." == n.rpc.plugin_stop(plugin="helloworld.py")[''])
     n.daemon.wait_for_log(r"Killing plugin: helloworld.py")
-    time.sleep(1)
     # Make sure that the 'hello' command from the helloworld.py plugin
     # is not available anymore.
     cmd = [hlp for hlp in n.rpc.help()["help"] if "hello" in hlp["command"]]
     assert(len(cmd) == 0)
 
-    # Test that we cannot stop a plugin with 'dynamic' set to False in
+    # Test that we cannot start a plugin with 'dynamic' set to False in
     # getmanifest
-    n.rpc.plugin_start(plugin=os.path.join(os.getcwd(), "tests/plugins/static.py"))
-    n.daemon.wait_for_log(r"Static plugin initialized.")
-    with pytest.raises(RpcError, match=r"plugin cannot be managed when lightningd is up"):
-        n.rpc.plugin_stop(plugin="static.py")
+    with pytest.raises(RpcError, match=r"Not a dynamic plugin"):
+        n.rpc.plugin_start(plugin=os.path.join(os.getcwd(), "tests/plugins/static.py"))
+
+    # Test that we cannot stop a started plugin with 'dynamic' flag set to
+    # False
+    n2 = node_factory.get_node(options={
+        "plugin": os.path.join(os.getcwd(), "tests/plugins/static.py")
+    })
+    with pytest.raises(RpcError, match=r"static.py cannot be managed when lightningd is up"):
+        n2.rpc.plugin_stop(plugin="static.py")
+
+    # Test that we don't crash when starting a broken plugin
+    with pytest.raises(RpcError, match=r"Timed out while waiting for plugin response"):
+        n2.rpc.plugin_start(plugin=os.path.join(os.getcwd(), "tests/plugins/broken.py"))
 
 
 def test_plugin_disable(node_factory):
@@ -290,6 +294,7 @@ def test_async_rpcmethod(node_factory, executor):
     assert [r.result() for r in results] == [42] * len(results)
 
 
+@unittest.skipIf(os.getenv('TEST_DB_PROVIDER', 'sqlite3') != 'sqlite3', "Only sqlite3 implements the db_write_hook currently")
 def test_db_hook(node_factory, executor):
     """This tests the db hook."""
     dbfile = os.path.join(node_factory.directory, "dblog.sqlite3")
@@ -426,10 +431,16 @@ def test_htlc_accepted_hook_fail(node_factory):
     ], wait_for_announce=True)
 
     # This must fail
-    inv = l2.rpc.invoice(1000, "lbl", "desc")['bolt11']
+    phash = l2.rpc.invoice(1000, "lbl", "desc")['payment_hash']
+    route = l1.rpc.getroute(l2.info['id'], 1000, 1)['route']
+
+    # Here shouldn't use `pay` command because l2 rejects with WIRE_TEMPORARY_NODE_FAILURE,
+    # then it will be excluded when l1 try another pay attempt.
+    # Note if the destination is excluded, the route result is undefined.
+    l1.rpc.sendpay(route, phash)
     with pytest.raises(RpcError) as excinfo:
-        l1.rpc.pay(inv)
-    assert excinfo.value.error['data']['failcode'] == 16399
+        l1.rpc.waitsendpay(phash)
+    assert excinfo.value.error['data']['failcode'] == 0x2002
     assert excinfo.value.error['data']['erring_index'] == 1
 
     # And the invoice must still be unpaid
@@ -439,7 +450,7 @@ def test_htlc_accepted_hook_fail(node_factory):
     # Now try with forwarded HTLCs: l2 should still fail them
     # This must fail
     inv = l3.rpc.invoice(1000, "lbl", "desc")['bolt11']
-    with pytest.raises(RpcError) as excinfo:
+    with pytest.raises(RpcError):
         l1.rpc.pay(inv)
 
     # And the invoice must still be unpaid

@@ -1,4 +1,5 @@
 from fixtures import *  # noqa: F401,F403
+from fixtures import TEST_NETWORK
 from flaky import flaky  # noqa: F401
 from lightning import RpcError, Millisatoshi
 from utils import DEVELOPER, wait_for, only_one, sync_blockheight, SLOW_MACHINE, TIMEOUT, VALGRIND
@@ -94,31 +95,101 @@ def test_pay_limits(node_factory):
 
     assert err.value.error['code'] == PAY_ROUTE_TOO_EXPENSIVE
 
-    # It should have retried (once without routehint, too)
+    # It should have retried two more times (one without routehint and one with routehint)
     status = l1.rpc.call('paystatus', {'bolt11': inv['bolt11']})['pay'][0]['attempts']
 
     # Excludes channel, then ignores routehint which includes that, then
     # it excludes other channel.
-    assert len(status) == 2
+    assert len(status) == 3
     assert status[0]['strategy'] == "Initial attempt"
+    # Exclude the channel l1->l2
     assert status[1]['strategy'].startswith("Excluded expensive channel ")
+    # With the routehint
+    assert status[2]['strategy'].startswith("Trying route hint")
 
     # Delay too high.
     with pytest.raises(RpcError, match=r'Route wanted delay of .* blocks') as err:
         l1.rpc.call('pay', {'bolt11': inv['bolt11'], 'msatoshi': 100000, 'maxdelay': 0})
 
     assert err.value.error['code'] == PAY_ROUTE_TOO_EXPENSIVE
-    # Should also have retried.
+    # Should also have retried two more times.
     status = l1.rpc.call('paystatus', {'bolt11': inv['bolt11']})['pay'][1]['attempts']
-    assert len(status) == 2
+    assert len(status) == 3
     assert status[0]['strategy'] == "Initial attempt"
     assert status[1]['strategy'].startswith("Excluded delaying channel ")
+    assert status[2]['strategy'].startswith("Trying route hint")
 
     # This works, because fee is less than exemptfee.
     l1.rpc.call('pay', {'bolt11': inv['bolt11'], 'msatoshi': 100000, 'maxfeepercent': 0.0001, 'exemptfee': 2000})
     status = l1.rpc.call('paystatus', {'bolt11': inv['bolt11']})['pay'][2]['attempts']
     assert len(status) == 1
     assert status[0]['strategy'] == "Initial attempt"
+
+
+def test_pay_exclude_node(node_factory, bitcoind):
+    """Test excluding the node if there's the NODE-level error in the failure_code
+    """
+    # FIXME: Remove our reliance on HTLCs failing on startup and the need for
+    #        this plugin
+    opts = [{}, {'plugin': os.path.join(os.getcwd(), 'tests/plugins/fail_htlcs.py')}, {}]
+    l1, l2, l3 = node_factory.line_graph(3, opts=opts, wait_for_announce=True)
+    amount = 10**8
+
+    inv = l3.rpc.invoice(amount, "test1", 'description')['bolt11']
+    with pytest.raises(RpcError):
+        l1.rpc.pay(inv)
+
+    # It should have retried (once without routehint, too)
+    status = l1.rpc.call('paystatus', {'bolt11': inv})['pay'][0]['attempts']
+
+    # Excludes channel, then ignores routehint which includes that, then
+    # it excludes other channel.
+    assert len(status) == 2
+    assert status[0]['strategy'] == "Initial attempt"
+    assert status[0]['failure']['data']['failcodename'] == 'WIRE_TEMPORARY_NODE_FAILURE'
+    assert status[1]['strategy'].startswith("Excluded node {}".format(l2.info['id']))
+    assert 'failure' in status[1]
+
+    # l1->l4->l5->l3 is the longer route. This makes sure this route won't be
+    # tried for the first pay attempt.
+    l4 = node_factory.get_node()
+    l5 = node_factory.get_node()
+    l1.rpc.connect(l4.info['id'], 'localhost', l4.port)
+    l4.rpc.connect(l5.info['id'], 'localhost', l5.port)
+    l5.rpc.connect(l3.info['id'], 'localhost', l3.port)
+    scid14 = l1.fund_channel(l4, 10**6, wait_for_active=False)
+    scid45 = l4.fund_channel(l5, 10**6, wait_for_active=False)
+    scid53 = l5.fund_channel(l3, 10**6, wait_for_active=False)
+    bitcoind.generate_block(5)
+
+    l1.daemon.wait_for_logs([r'update for channel {}/0 now ACTIVE'
+                             .format(scid14),
+                             r'update for channel {}/1 now ACTIVE'
+                             .format(scid14),
+                             r'update for channel {}/0 now ACTIVE'
+                             .format(scid45),
+                             r'update for channel {}/1 now ACTIVE'
+                             .format(scid45),
+                             r'update for channel {}/0 now ACTIVE'
+                             .format(scid53),
+                             r'update for channel {}/1 now ACTIVE'
+                             .format(scid53)])
+
+    inv = l3.rpc.invoice(amount, "test2", 'description')['bolt11']
+
+    # This `pay` will work
+    l1.rpc.pay(inv)
+
+    # It should have retried (once without routehint, too)
+    status = l1.rpc.call('paystatus', {'bolt11': inv})['pay'][0]['attempts']
+
+    # Excludes channel, then ignores routehint which includes that, then
+    # it excludes other channel.
+    assert len(status) == 2
+    assert status[0]['strategy'] == "Initial attempt"
+    assert status[0]['failure']['data']['failcodename'] == 'WIRE_TEMPORARY_NODE_FAILURE'
+    assert status[1]['strategy'].startswith("Excluded node {}".format(l2.info['id']))
+    assert 'success' in status[1]
 
 
 def test_pay0(node_factory):
@@ -490,6 +561,7 @@ def test_sendpay(node_factory):
     assert payments[0]['payment_preimage'] == preimage3
 
 
+@unittest.skipIf(TEST_NETWORK != 'regtest', "The reserve computation is bitcoin specific")
 def test_sendpay_cant_afford(node_factory):
     l1, l2 = node_factory.line_graph(2, fundamount=10**6)
 
@@ -846,7 +918,7 @@ def test_decodepay(node_factory):
         l1.rpc.decodepay('1111111')
 
 
-@unittest.skipIf(not DEVELOPER, "Too slow without --dev-bitcoind-poll")
+@unittest.skipIf(not DEVELOPER, "Too slow without --dev-fast-gossip")
 def test_forward(node_factory, bitcoind):
     # Connect 1 -> 2 -> 3.
     l1, l2, l3 = node_factory.line_graph(3, fundchannel=True)
@@ -905,7 +977,7 @@ def test_forward(node_factory, bitcoind):
     l1.rpc.waitsendpay(rhash)
 
 
-@unittest.skipIf(not DEVELOPER, "needs DEVELOPER=1 for --dev-broadcast-interval")
+@unittest.skipIf(not DEVELOPER, "needs --dev-fast-gossip")
 def test_forward_different_fees_and_cltv(node_factory, bitcoind):
     # FIXME: Check BOLT quotes here too
     # BOLT #7:
@@ -1041,7 +1113,7 @@ def test_forward_different_fees_and_cltv(node_factory, bitcoind):
         assert c[1]['source'] == c[0]['destination']
 
 
-@unittest.skipIf(not DEVELOPER, "needs DEVELOPER=1 for --dev-broadcast-interval")
+@unittest.skipIf(not DEVELOPER, "too slow without --dev-fast-gossip")
 def test_forward_pad_fees_and_cltv(node_factory, bitcoind):
     """Test that we are allowed extra locktime delta, and fees"""
 
@@ -1729,6 +1801,7 @@ def test_pay_direct(node_factory, bitcoind):
         assert l1l2msat == l1l2msatreference
 
 
+@unittest.skipIf(not DEVELOPER, "updates are delayed without --dev-fast-gossip")
 def test_setchannelfee_usage(node_factory, bitcoind):
     # TEST SETUP
     #
@@ -1753,9 +1826,13 @@ def test_setchannelfee_usage(node_factory, bitcoind):
     l1.rpc.connect(l3.info['id'], 'localhost', l3.port)
     l1.fund_channel(l2, 1000000)
 
+    def channel_get_fees(scid):
+        return l1.db.query(
+            'SELECT feerate_base, feerate_ppm FROM channels '
+            'WHERE short_channel_id=\'{}\';'.format(scid))
+
     # get short channel id
     scid = l1.get_channel_scid(l2)
-    scid_hex = scid.encode('utf-8').hex()
 
     # feerates should be init with global config
     db_fees = l1.db_query('SELECT feerate_base, feerate_ppm FROM channels;')
@@ -1774,9 +1851,7 @@ def test_setchannelfee_usage(node_factory, bitcoind):
     assert(result['channels'][0]['short_channel_id'] == scid)
 
     # check if custom values made it into the database
-    db_fees = l1.db_query(
-        'SELECT feerate_base, feerate_ppm FROM channels '
-        'WHERE hex(short_channel_id)="' + scid_hex + '";')
+    db_fees = channel_get_fees(scid)
     assert(db_fees[0]['feerate_base'] == 1337)
     assert(db_fees[0]['feerate_ppm'] == 137)
 
@@ -1807,9 +1882,7 @@ def test_setchannelfee_usage(node_factory, bitcoind):
     result = l1.rpc.setchannelfee(scid, 0, 0)
     assert(result['base'] == 0)
     assert(result['ppm'] == 0)
-    db_fees = l1.db_query(
-        'SELECT feerate_base, feerate_ppm FROM channels '
-        'WHERE hex(short_channel_id)="' + scid_hex + '";')
+    db_fees = channel_get_fees(scid)
     assert(db_fees[0]['feerate_base'] == 0)
     assert(db_fees[0]['feerate_ppm'] == 0)
 
@@ -1818,9 +1891,7 @@ def test_setchannelfee_usage(node_factory, bitcoind):
     assert(result['base'] == DEF_BASE)
     assert(result['ppm'] == DEF_PPM)
     # check default values in DB
-    db_fees = l1.db_query(
-        'SELECT feerate_base, feerate_ppm FROM channels '
-        'WHERE hex(short_channel_id)="' + scid_hex + '";')
+    db_fees = channel_get_fees(scid)
     assert(db_fees[0]['feerate_base'] == DEF_BASE)
     assert(db_fees[0]['feerate_ppm'] == DEF_PPM)
 
@@ -1831,9 +1902,7 @@ def test_setchannelfee_usage(node_factory, bitcoind):
     assert(len(result['channels']) == 1)
     assert(result['channels'][0]['peer_id'] == l2.info['id'])
     assert(result['channels'][0]['short_channel_id'] == scid)
-    db_fees = l1.db_query(
-        'SELECT feerate_base, feerate_ppm FROM channels '
-        'WHERE hex(short_channel_id)="' + scid_hex + '";')
+    db_fees = channel_get_fees(scid)
     assert(db_fees[0]['feerate_base'] == 42)
     assert(db_fees[0]['feerate_ppm'] == 43)
 
@@ -1846,9 +1915,7 @@ def test_setchannelfee_usage(node_factory, bitcoind):
     # check if 'base' unit can be modified to satoshi
     result = l1.rpc.setchannelfee(scid, '1sat')
     assert(result['base'] == 1000)
-    db_fees = l1.db_query(
-        'SELECT feerate_base, feerate_ppm FROM channels '
-        'WHERE hex(short_channel_id)="' + scid_hex + '";')
+    db_fees = channel_get_fees(scid)
     assert(db_fees[0]['feerate_base'] == 1000)
 
     # check if 'ppm' values greater than u32_max fail
@@ -2061,6 +2128,7 @@ def test_setchannelfee_restart(node_factory, bitcoind):
     assert result['msatoshi_sent'] == 5002020
 
 
+@unittest.skipIf(not DEVELOPER, "updates are delayed without --dev-fast-gossip")
 def test_setchannelfee_all(node_factory, bitcoind):
     # TEST SETUP
     #
@@ -2185,6 +2253,7 @@ def test_channel_spendable_capped(node_factory, bitcoind):
     assert l1.rpc.listpeers()['peers'][0]['channels'][0]['spendable_msat'] == Millisatoshi(0xFFFFFFFF)
 
 
+@unittest.skipIf(TEST_NETWORK != 'regtest', 'The numbers below are bitcoin specific')
 def test_channel_drainage(node_factory, bitcoind):
     """Test channel drainage.
 

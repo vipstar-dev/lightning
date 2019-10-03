@@ -5,7 +5,7 @@
 
 # Begin!  (passes gossipd-client fd)
 msgtype,channel_init,1000
-msgdata,channel_init,chain_hash,bitcoin_blkid,
+msgdata,channel_init,chainparams,chainparams,
 msgdata,channel_init,funding_txid,bitcoin_txid,
 msgdata,channel_init,funding_txout,u16,
 msgdata,channel_init,funding_satoshi,amount_sat,
@@ -68,8 +68,8 @@ msgdata,channel_init,upfront_shutdown_script_len,u16,
 msgdata,channel_init,upfront_shutdown_script,u8,upfront_shutdown_script_len
 msgdata,channel_init,remote_ann_node_sig,?secp256k1_ecdsa_signature,
 msgdata,channel_init,remote_ann_bitcoin_sig,?secp256k1_ecdsa_signature,
-msgdata,channel_init,announce_delay,u32,
 msgdata,channel_init,option_static_remotekey,bool,
+msgdata,channel_init,dev_fast_gossip,bool,
 
 # master->channeld funding hit new depth(funding locked if >= lock depth)
 msgtype,channel_funding_depth,1002

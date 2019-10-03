@@ -7,7 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
-- JSON API: `listfunds` now lists a blockheight for confirmed transactions
+- JSON API: `listfunds` now lists a blockheight for confirmed transactions,
+  and has `connected` and `state` fields for channels, like `listpeers`.
 - JSON API: `fundchannel_start` now includes field `scriptpubkey`
 - JSON API: `txprepare` and `withdraw` now accept an optional parameter `utxos`, a list of utxos to include in the prepared transaction
 
@@ -15,12 +16,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Protocol: we now retransmit `funding_locked` upon reconnection while closing if there was no update
 - Plugin: new notifications `sendpay_success` and `sendpay_failure`.
+- Protocol: we now offer `option_gossip_queries_ex` for finegrained gossip control.
+- Protocol: no longer ask for `initial_routing_sync` (only affects ancient peers).
 
 ### Changed
 
 - JSON API: `txprepare` now uses `outputs` as parameter other than `destination` and `satoshi`
 - Build: Now requires [`gettext`](https://www.gnu.org/software/gettext/)
 - JSON API: `fundchannel_cancel` is extended to work before funding broadcast.
+- JSON API: The parameter `exclude` of `getroute` now also support node-id.
+- JSON-API: `pay` can exclude error nodes if the failcode of `sendpay` has the NODE bit set
+- JSON API: The `plugin` command now returns on error. A timeout of 20 seconds is added to `start` and `startdir`
+            subcommands at the end of which the plugin is errored if it did not complete the handshake with `lightningd`.
+- JSON API: The `plugin` command does not allow to start static plugins after `lightningd` startup anymore.
 
 ### Deprecated
 
@@ -253,6 +261,7 @@ This release named by @molxyz and [@ctrlbreak](https://twitter.com/ctrlbreak).
 - JSON API: `listpeers`'s `channels` now includes a `private` flag to indicate if channel is announced or not.
 - JSON API: `invoice` route hints may now include private channels if you have no public ones, unless new option `exposeprivatechannels` is false.
 - Plugins: experimental plugin support for `lightningd`, including option passthrough and JSON-RPC passthrough.
+- Protocol: we now support features `option_static_remotekey` and `gossip_queries_ex` for peers.
 
 ### Changed
 
