@@ -694,11 +694,8 @@ static struct block *new_block(struct chain_topology *topo,
 {
 	struct block *b = tal(topo, struct block);
 
-<<<<<<< HEAD
-	sha256_header(&b->blkid.shad, &blk->hdr);
-=======
+//	sha256_header(&b->blkid.shad, &blk->hdr);
 	bitcoin_block_blkid(blk, &b->blkid);
->>>>>>> upstream/master
 	log_debug(topo->log, "Adding block %u: %s",
 		  height,
 		  type_to_string(tmpctx, struct bitcoin_blkid, &b->blkid));
