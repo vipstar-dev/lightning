@@ -25,7 +25,23 @@ struct bitcoin_block *bitcoin_block_from_hex(const tal_t *ctx,
 	if (!hex_decode(hex, hexlen, linear_tx, len))
 		return tal_free(b);
 
-	get_header(&p, &len, &b->hdr);
+	b->hdr.version = pull_le32(&p, &len);
+	pull(&p, &len, &b->hdr.prev_hash, sizeof(b->hdr.prev_hash));
+	pull(&p, &len, &b->hdr.merkle_hash, sizeof(b->hdr.merkle_hash));
+	b->hdr.timestamp = pull_le32(&p, &len);
+
+	b->hdr.target = pull_le32(&p, &len);
+	b->hdr.nonce = pull_le32(&p, &len);
+	b->qtum_hdr = tal(b, struct qtum_block_hdr);
+	b->qtum_hdr->block_height = pull_le32(&p, &len);
+	pull(&p, &len, &b->qtum_hdr->hashStateRoot, sizeof(b->qtum_hdr->hashStateRoot));
+	pull(&p, &len, &b->qtum_hdr->hashUTXORoot, sizeof(b->qtum_hdr->hashUTXORoot));
+	pull(&p, &len, &b->qtum_hdr->prev_stake_hash, sizeof(b->qtum_hdr->prev_stake_hash));
+	b->qtum_hdr->prev_stake_n = pull_le32(&p, &len);
+	size_t sig_len = pull_varint(&p, &len);
+	b->qtum_hdr->vchSig = tal_arr(b->qtum_hdr, u8, sig_len);
+	pull(&p, &len, b->qtum_hdr->vchSig, sig_len);
+
 	num = pull_varint(&p, &len);
 	b->tx = tal_arr(b, struct bitcoin_tx *, num);
 	for (i = 0; i < num; i++)
@@ -41,31 +57,62 @@ struct bitcoin_block *bitcoin_block_from_hex(const tal_t *ctx,
 
 void get_header(const u8 **p, size_t *len, struct bitcoin_block_hdr *hdr)
 {
-    pull(p, len, hdr, sizeof(*hdr) - sizeof(hdr->vchSig));
+	pull(p, len, hdr, sizeof(*hdr) - sizeof(hdr->vchSig));
 
-    u8 xx = pull_varint(p, len);
+	u8 xx = pull_varint(p, len);
 
-    hdr->vchSig = tal_arr(hdr, u8, xx + 1);
+	hdr->vchSig = tal_arr(hdr, u8, xx + 1);
 
-    hdr->vchSig[0] = xx;
-    pull(p, len, hdr->vchSig + 1, xx);
+	hdr->vchSig[0] = xx;
+	pull(p, len, hdr->vchSig + 1, xx);
 }
 
 void sha256_header(struct sha256_double *shadouble, const struct bitcoin_block_hdr *hdr)
 {
-    //lenght header without vchSig
-    size_t len = sizeof(*hdr) - sizeof(&hdr->vchSig);
+	//lenght header without vchSig
+	size_t len = sizeof(*hdr) - sizeof(&hdr->vchSig);
 
 	//length hd->vchSig
 	size_t lenVch = 1 + hdr->vchSig[0];
 
-    u8 * hdrWithVchSig = (u8*) malloc(len + 1 + hdr->vchSig[0]);
-    memcpy(hdrWithVchSig, hdr, len);
-    memcpy(hdrWithVchSig + len, &hdr->vchSig[0], lenVch);
+	u8 * hdrWithVchSig = (u8*) malloc(len + 1 + hdr->vchSig[0]);
+	memcpy(hdrWithVchSig, hdr, len);
+	memcpy(hdrWithVchSig + len, &hdr->vchSig[0], lenVch);
 
 	sha256_double(shadouble, hdrWithVchSig, len + lenVch);
 
-    free(hdrWithVchSig);
+	free(hdrWithVchSig);
+}
+*/
+
+void bitcoin_block_blkid(const struct bitcoin_block *b,
+			 struct bitcoin_blkid *out)
+{
+	struct sha256_ctx shactx;
+	u8 vt[VARINT_MAX_LEN];
+	size_t vtlen;
+
+	sha256_init(&shactx);
+	sha256_le32(&shactx, b->hdr.version);
+	sha256_update(&shactx, &b->hdr.prev_hash, sizeof(b->hdr.prev_hash));
+	sha256_update(&shactx, &b->hdr.merkle_hash, sizeof(b->hdr.merkle_hash));
+	sha256_le32(&shactx, b->hdr.timestamp);
+
+	sha256_le32(&shactx, b->hdr.target);
+	sha256_le32(&shactx, b->hdr.nonce);
+
+	size_t slen = tal_bytelen(b->qtum_hdr->vchSig);
+	sha256_le32(&shactx, b->qtum_hdr->block_height);
+
+	sha256_update(&shactx, &b->qtum_hdr->hashStateRoot, sizeof(b->qtum_hdr->hashStateRoot)); // qtum
+	sha256_update(&shactx, &b->qtum_hdr->hashUTXORoot, sizeof(b->qtum_hdr->hashUTXORoot)); // qtum
+	sha256_update(&shactx, &b->qtum_hdr->prev_stake_hash, sizeof(b->qtum_hdr->prev_stake_hash));
+	sha256_le32(&shactx, b->qtum_hdr->prev_stake_n);
+
+	vtlen = varint_put(vt, slen);
+	sha256_update(&shactx, vt, vtlen);
+	sha256_update(&shactx, b->qtum_hdr->vchSig, slen);
+	sha256_double_done(&shactx, &out->shad);
 }
 
 /* We do the same hex-reversing crud as txids. */

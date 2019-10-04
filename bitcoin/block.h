@@ -13,7 +13,7 @@ struct bitcoin_blkid {
 };
 /* Define bitcoin_blkid_eq (no padding) */
 STRUCTEQ_DEF(bitcoin_blkid, 0, shad.sha.u);
-#pragma pack(push, 4)
+
 struct bitcoin_block_hdr {
 	le32 version;
 	struct bitcoin_blkid prev_hash;
@@ -21,7 +21,10 @@ struct bitcoin_block_hdr {
 	le32 timestamp;
 	le32 target;
 	le32 nonce;
+};
 
+struct qtum_block_hdr {
+	u32 block_height;
 	struct sha256_double hashStateRoot; // qtum
 	struct sha256_double hashUTXORoot; //  qtum
 
@@ -30,15 +33,19 @@ struct bitcoin_block_hdr {
 
 	u8 *vchSig;
 };
-#pragma pack(pop)
+
 struct bitcoin_block {
 	struct bitcoin_block_hdr hdr;
+	struct qtum_block_hdr *qtum_hdr;
 	/* tal_count shows now many */
 	struct bitcoin_tx **tx;
 };
 
 struct bitcoin_block *bitcoin_block_from_hex(const tal_t *ctx,
 					     const char *hex, size_t hexlen);
+/* Compute the double SHA block ID from the block header. */
+void bitcoin_block_blkid(const struct bitcoin_block *block,
+			 struct bitcoin_blkid *out);
 
 /* Parse hex string to get blockid (reversed, a-la bitcoind). */
 bool bitcoin_blkid_from_hex(const char *hexstr, size_t hexstr_len,
