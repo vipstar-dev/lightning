@@ -43,16 +43,21 @@ bitcoin_block_from_hex(const tal_t *ctx, const struct chainparams *chainparams,
 		b->elements_hdr->proof.solution = tal_arr(b->elements_hdr, u8, solution_len);
 		pull(&p, &len, b->elements_hdr->proof.solution, solution_len);
 
+	} else if (is_qtum(chainparams)){
+		b->hdr.target = pull_le32(&p, &len);
+		b->hdr.nonce = pull_le32(&p, &len);
+		b->qtum_hdr = tal(b, struct qtum_block_hdr);
+		b->qtum_hdr->block_height = pull_le32(&p, &len);
+		pull(&p, &len, &b->qtum_hdr->hashStateRoot, sizeof(b->qtum_hdr->hashStateRoot));
+		pull(&p, &len, &b->qtum_hdr->hashUTXORoot, sizeof(b->qtum_hdr->hashUTXORoot));
+		pull(&p, &len, &b->qtum_hdr->prev_stake_hash, sizeof(b->qtum_hdr->prev_stake_hash));
+		b->qtum_hdr->prev_stake_n = pull_le32(&p, &len);
+		size_t sig_len = pull_varint(&p, &len);
+		b->qtum_hdr->vchSig = tal_arr(b->qtum_hdr, u8, sig_len);
+		pull(&p, &len, b->qtum_hdr->vchSig, sig_len);
 	} else {
 		b->hdr.target = pull_le32(&p, &len);
 		b->hdr.nonce = pull_le32(&p, &len);
-		pull(&p, &len, &b->hdr.hashStateRoot, sizeof(b->hdr.hashStateRoot));
-		pull(&p, &len, &b->hdr.hashUTXORoot, sizeof(b->hdr.hashUTXORoot));
-		pull(&p, &len, &b->hdr.prev_stake_hash, sizeof(b->hdr.prev_stake_hash));
-		b->hdr.prev_stake_n = pull_le32(&p, &len);
-		size_t sig_len = pull_varint(&p, &len);
-		b->hdr.vchSig = tal_arr(b->hdr, u8, sig_len);
-		pull(&p, &len, b->hdr.vchSig, sig_len);
 	}
 
 	num = pull_varint(&p, &len);
@@ -123,17 +128,24 @@ void bitcoin_block_blkid(const struct bitcoin_block *b,
 		sha256_update(&shactx, b->elements_hdr->proof.challenge, clen);
 		/* The solution is skipped, since that'd create a circular
 		 * dependency apparently */
+	} else if (is_qtum(chainparams)) {
+		sha256_le32(&shactx, b->hdr.target);
+		sha256_le32(&shactx, b->hdr.nonce);
+
+		size_t slen = tal_bytelen(b->qtum_hdr->vchSig);
+		sha256_le32(&shactx, b->qtum_hdr->block_height);
+
+		sha256_update(&shactx, &b->qtum_hdr->hashStateRoot, sizeof(b->qtum_hdr->hashStateRoot)); // qtum
+		sha256_update(&shactx, &b->qtum_hdr->hashUTXORoot, sizeof(b->qtum_hdr->hashUTXORoot)); // qtum
+		sha256_update(&shactx, &b->qtum_hdr->prev_stake_hash, sizeof(b->qtum_hdr->prev_stake_hash));
+		sha256_le32(&shactx, b->qtum_hdr->prev_stake_n);
+
+		vtlen = varint_put(vt, slen);
+		sha256_update(&shactx, vt, vtlen);
+		sha256_update(&shactx, b->qtum_hdr->vchSig, slen);
 	} else {
 		sha256_le32(&shactx, b->hdr.target);
 		sha256_le32(&shactx, b->hdr.nonce);
-		sha256_update(&shactx, &b->hdr.hashStateRoot, sizeof(b->hdr.hashStateRoot));
-		sha256_update(&shactx, &b->hdr.hashUTXORoot, sizeof(b->hdr.hashUTXORoot));
-		sha256_update(&shactx, &b->hdr.prev_stake_hash, sizeof(b->hdr.prev_stake_hash));
-		sha256_le32(&shactx, b->hdr.prev_stake_n);
-		size_t slen = tal_bytelen(b->hdr.vchSig);
-		vtlen = varint_put(vt, slen);
-		sha256_update(&shactx, vt, vtlen);
-		sha256_update(&shactx, b->hdr.vchSig, slen);
 	}
 	sha256_double_done(&shactx, &out->shad);
 }

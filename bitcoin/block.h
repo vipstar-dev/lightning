@@ -15,7 +15,6 @@ struct bitcoin_blkid {
 };
 /* Define bitcoin_blkid_eq (no padding) */
 STRUCTEQ_DEF(bitcoin_blkid, 0, shad.sha.u);
-#pragma pack(push, 4)
 struct bitcoin_block_hdr {
 	le32 version;
 	struct bitcoin_blkid prev_hash;
@@ -23,16 +22,7 @@ struct bitcoin_block_hdr {
 	le32 timestamp;
 	le32 target;
 	le32 nonce;
-
-	struct sha256_double hashStateRoot; // qtum
-	struct sha256_double hashUTXORoot; //  qtum
-
-	struct sha256_double prev_stake_hash;
-	le32 prev_stake_n;
-
-	u8 *vchSig;
 };
-#pragma pack(pop)
 
 struct elements_block_proof {
 	u8 *challenge;
@@ -44,9 +34,21 @@ struct elements_block_hdr {
 	struct elements_block_proof proof;
 };
 
+struct qtum_block_hdr {
+	u32 block_height;
+	struct sha256_double hashStateRoot; // qtum
+	struct sha256_double hashUTXORoot; //  qtum
+
+	struct sha256_double prev_stake_hash;
+	le32 prev_stake_n;
+
+	u8 *vchSig;
+};
+
 struct bitcoin_block {
 	struct bitcoin_block_hdr hdr;
 	struct elements_block_hdr *elements_hdr;
+	struct qtum_block_hdr *qtum_hdr;
 	/* tal_count shows now many */
 	struct bitcoin_tx **tx;
 };
