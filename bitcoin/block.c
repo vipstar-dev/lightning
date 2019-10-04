@@ -55,6 +55,7 @@ struct bitcoin_block *bitcoin_block_from_hex(const tal_t *ctx,
 	return b;
 }
 
+/*
 void get_header(const u8 **p, size_t *len, struct bitcoin_block_hdr *hdr)
 {
 	pull(p, len, hdr, sizeof(*hdr) - sizeof(hdr->vchSig));
