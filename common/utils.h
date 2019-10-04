@@ -16,6 +16,8 @@ extern const struct chainparams *chainparams;
  * circular dependencies (should only be used in `bitcoin/y`). */
 bool is_elements(const struct chainparams *chainparams);
 
+bool is_qtum(const struct chainparams *chainparams);
+
 /* Allocate and fill in a hex-encoded string of this data. */
 char *tal_hexstr(const tal_t *ctx, const void *data, size_t len);
 
