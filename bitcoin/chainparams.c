@@ -75,7 +75,7 @@ const struct chainparams networks[] = {
      .p2sh_version = 50,
      .testnet = false,
      .bip32_key_version = {.bip32_pubkey_version = BIP32_VER_MAIN_PUBLIC,
-     			   .bip32_privkey_version = BIP32_VER_MAIN_PRIVATE}},
+     			   .bip32_privkey_version = BIP32_VER_MAIN_PRIVATE},
      .is_elements = false,
      .is_qtum = true},
     {.network_name = "vipstarcoin",
