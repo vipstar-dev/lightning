@@ -15,6 +15,11 @@ bool is_elements(const struct chainparams *chainparams)
 	return chainparams->is_elements;
 }
 
+bool is_qtum(const struct chainparams *chainparams)
+{
+	return chainparams->is_qtum;
+}
+
 char *tal_hexstr(const tal_t *ctx, const void *data, size_t len)
 {
 	char *str = tal_arr(ctx, char, hex_str_size(len));
